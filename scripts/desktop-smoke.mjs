@@ -181,10 +181,15 @@ try {
   await window.locator('#quota-recovery-delay').press('Tab');
   await quotaSettings.getByText('固定时间间隔', { exact: true }).click();
   await expect(quotaSettings.getByRole('radio', { name: '固定时间间隔', exact: true })).toBeChecked();
+  await expect(quotaSettings.getByRole('switch')).toBeChecked();
   await expect(window.locator('#quota-recovery-delay')).toHaveCount(0);
   await window.locator('#quota-check-interval').fill('30');
   await window.locator('#quota-check-interval').press('Tab');
   await quotaSettings.locator('.el-switch').click();
+  await expect(quotaSettings.getByRole('switch')).not.toBeChecked();
+  await quotaSettings.getByText('按预计恢复时间', { exact: true }).click();
+  await expect(quotaSettings.getByRole('switch')).not.toBeChecked();
+  await quotaSettings.getByText('固定时间间隔', { exact: true }).click();
   await expect(quotaSettings.getByRole('switch')).not.toBeChecked();
   const switchControl = window.locator('.settings-card').filter({ has: window.getByRole('heading', { name: '监控与桌面', exact: true }) }).locator('.el-switch').first();
   await switchControl.click();

@@ -5,7 +5,7 @@ import { exampleQuota } from '../src/scenarios.ts';
 import { defaultQuotaCheck, nextDailyQuotaCheck, normalizeQuotaCheck, quotaCheckAt, validateQuotaCheck } from '../src/app/quota-schedule.ts';
 
 const now = new Date(2026, 9, 26, 12, 0, 0).getTime();
-const recovery = { ...defaultQuotaCheck, dailyResetCheck: false };
+const recovery = { ...defaultQuotaCheck, recoveryDelayMinutes: 1, dailyResetCheck: false };
 
 test('预计三小时恢复时等待三小时一分钟，固定模式仍按配置间隔查询', () => {
   const quota = quotaGate(exampleQuota(100, now + 3 * 3600000), 'codex', now);

@@ -81,6 +81,8 @@ test('预计恢复模式中间只检查会话，三小时一分钟后共用一�
   let now = start;
   const { service, desktop, cleanup } = await setup(() => now);
   try {
+    await service.command({ type: 'settings', value: { ...service.db.settings(),
+      quotaCheck: { ...service.db.settings().quotaCheck, recoveryDelayMinutes: 1 } } });
     await add(service, desktop); await service.tick(true);
     const due = start + 3 * 3600000 + 60000;
     assert.equal(service.snapshot().nextQuotaCheckAt, due);
