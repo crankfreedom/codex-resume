@@ -8,7 +8,7 @@ export interface QuotaCheckSettings {
 }
 
 export const defaultQuotaCheck: QuotaCheckSettings = {
-  mode: 'recovery', intervalSeconds: 60, recoveryDelayMinutes: 1, dailyResetCheck: true,
+  mode: 'recovery', intervalSeconds: 60, recoveryDelayMinutes: 10, dailyResetCheck: true,
 };
 
 export function validateQuotaCheck(value: unknown): QuotaCheckSettings {
@@ -18,8 +18,10 @@ export function validateQuotaCheck(value: unknown): QuotaCheckSettings {
     || !Number.isInteger(settings.intervalSeconds) || settings.intervalSeconds < 10 || settings.intervalSeconds > 3600
     || !Number.isInteger(settings.recoveryDelayMinutes) || settings.recoveryDelayMinutes < 0 || settings.recoveryDelayMinutes > 60
     || typeof settings.dailyResetCheck !== 'boolean') throw new Error('额度查询设置无效');
-  return { mode: settings.mode, intervalSeconds: settings.intervalSeconds,
-    recoveryDelayMinutes: settings.recoveryDelayMinutes, dailyResetCheck: settings.dailyResetCheck };
+  return {
+    mode: settings.mode, intervalSeconds: settings.intervalSeconds,
+    recoveryDelayMinutes: settings.recoveryDelayMinutes, dailyResetCheck: settings.dailyResetCheck
+  };
 }
 
 export function normalizeQuotaCheck(value: unknown): QuotaCheckSettings {
