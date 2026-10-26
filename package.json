@@ -1,0 +1,49 @@
+{
+  "name": "codex-resume",
+  "version": "0.2.3",
+  "private": true,
+  "type": "module",
+  "description": "Codex 桌面任务额度监控与原会话续跑助手",
+  "main": "out/main/index.js",
+  "engines": { "node": ">=24.0.0" },
+  "packageManager": "pnpm@11.20.0",
+  "scripts": {
+    "start": "node scripts/launch.mjs preview",
+    "dev": "node scripts/launch.mjs dev",
+    "cli": "node src/cli.ts",
+    "typecheck": "tsc --noEmit && vue-tsc --noEmit -p tsconfig.renderer.json",
+    "build": "pnpm typecheck && electron-vite build",
+    "test": "node --test test/*.test.ts",
+    "test:desktop": "node scripts/desktop-smoke.mjs",
+    "test:workflow": "node scripts/workflow-smoke.mjs",
+    "pack": "pnpm build && pnpm install:electron && electron-builder --win --x64 --dir",
+    "dist": "pnpm build && pnpm install:electron && electron-builder --win nsis --x64",
+    "install:electron": "node node_modules/electron/install.js"
+  },
+  "dependencies": {
+    "vue": "^3.5.0",
+    "pinia": "^3.0.0",
+    "element-plus": "^2.11.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "~5.9.3",
+    "electron": "45.0.0",
+    "electron-vite": "6.0.0",
+    "vite": "8.3.5",
+    "@vitejs/plugin-vue": "6.0.10",
+    "vue-tsc": "^3.0.0",
+    "electron-builder": "^26.0.0",
+    "@playwright/test": "^1.56.0"
+  },
+  "build": {
+    "appId": "local.codex-resume.desktop",
+    "productName": "Codex Resume",
+    "directories": { "output": "release" },
+    "files": ["out/**/*", "resources/icons/logo.png", "package.json"],
+    "asar": true,
+    "electronDist": "node_modules/electron/dist",
+    "win": { "target": ["nsis"], "artifactName": "Codex-Resume-${version}-Setup.${ext}", "icon": "resources/icons/logo.png", "signAndEditExecutable": true, "signExecutable": false },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "createDesktopShortcut": true }
+  }
+}

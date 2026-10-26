@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "erasableSyntaxOnly": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "types": ["node", "electron-vite/node"],
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts", "electron/**/*.ts", "test/**/*.ts", "electron.vite.config.ts"],
+  "exclude": ["renderer"]
+}
