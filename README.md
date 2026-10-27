@@ -67,7 +67,7 @@ pnpm --dir codex-resume dev
 
 ### 应用图标
 
-统一源图是 `resources/icons/logo.png`，当前为用户提供的 1200×1200 透明 PNG。侧栏、说明书封面、窗口、托盘、通知和 Windows 程序/安装包共用它；替换此文件后重新构建、打包即可更新，不需要维护多份源图。
+统一源图是 `resources/icons/logo.png`，当前为 256×256 透明 PNG，由用户提供的 200×200 图案等比放大。侧栏、说明书封面、窗口、托盘、通知和 Windows 程序/安装包共用它；替换此文件后重新构建、打包即可更新，不需要维护多份源图。Windows 打包要求源图宽高均不小于 256 像素；替换时请使用至少 256×256 的正方形 PNG，否则 `pack / dist` 会报 `Icon must be at least 256x256 pixels`。放大可满足打包尺寸要求，但不会增加原图细节。
 
 界面由 Vite 打包图片；主进程通过 `?asset` 定位源图，读取为 NativeImage，窗口采用 256×256 表示、托盘采用 32×32 表示。该目录属于 electron-vite 主进程默认 publicDir，`?asset` 不会自动把文件复制进 out，所以 `build.files` 显式包含 `resources/icons/logo.png`，确保安装后仍可读取。
 
