@@ -76,19 +76,17 @@ test('旧设置补齐外观，活动任务可保存外观，非法字号不能�
   }
 });
 
-test('预计恢复模式中间只检查会话，三小时一分钟后共用一次新额度查询并完成后停托管', async () => {
+test('默认十分钟检查不受三小时恢复时间约束，共用新额度并完成后停托管', async () => {
   const start = new Date(2026, 9, 26, 12).getTime();
   let now = start;
   const { service, desktop, cleanup } = await setup(() => now);
   try {
-    await service.command({ type: 'settings', value: { ...service.db.settings(),
-      quotaCheck: { ...service.db.settings().quotaCheck, recoveryDelayMinutes: 1 } } });
     await add(service, desktop); await service.tick(true);
-    const due = start + 3 * 3600000 + 60000;
+    const due = start + 600000;
     assert.equal(service.snapshot().nextQuotaCheckAt, due);
     assert.equal(service.db.tasks()[0]!.nextCheckAt, due);
     const calls = desktop.quotaCalls;
-    for (const elapsed of [15000, 60000, 3600000, 3 * 3600000 + 59000]) {
+    for (const elapsed of [15000, 60000, 300000, 599000]) {
       now = start + elapsed; await service.tick();
       assert.equal(desktop.quotaCalls, calls); assert.equal(desktop.sends, 0);
     }
@@ -104,13 +102,14 @@ test('预计恢复模式中间只检查会话，三小时一分钟后共用一�
   } finally { await cleanup(); }
 });
 
-test('固定模式不受旧恢复时间约束，额度查询周期独立于任务检查周期', async () => {
+test('修改定期间隔立即重排等待任务，额度查询周期独立于任务检查周期', async () => {
   let now = new Date(2026, 9, 26, 12).getTime();
   const { service, desktop, cleanup } = await setup(() => now);
   try {
     await add(service, desktop); await service.tick(true);
     await service.command({ type: 'settings', value: { ...service.db.settings(), pollSeconds: 300,
-      quotaCheck: { ...defaultQuotaCheck, mode: 'fixed', intervalSeconds: 10, dailyResetCheck: false } } });
+      quotaCheck: { intervalSeconds: 10 } } });
+    assert.equal(service.db.tasks()[0]!.nextCheckAt, now + 10000);
     const calls = desktop.quotaCalls;
     now += 9000; await service.tick(); assert.equal(desktop.quotaCalls, calls);
     now += 1000; await service.tick(); assert.equal(desktop.quotaCalls, calls + 1);
@@ -120,24 +119,26 @@ test('固定模式不受旧恢复时间约束，额度查询周期独立于任�
   } finally { await cleanup(); }
 });
 
-test('每日零点十分检查越过任务原等待时间，休眠错过后补查且不会连续重复', async () => {
+test('零点十分不插入检查，休眠错过定期检查后补查且不会连续重复', async () => {
   let now = new Date(2026, 9, 26, 0, 9, 30).getTime();
   const { service, desktop, cleanup } = await setup(() => now);
   try {
     await add(service, desktop); await service.tick(true);
-    const daily = new Date(2026, 9, 26, 0, 10).getTime();
-    assert.equal(service.snapshot().nextQuotaCheckAt, daily);
+    assert.equal(service.snapshot().nextQuotaCheckAt, now + 600000);
     const calls = desktop.quotaCalls;
+    now = new Date(2026, 9, 26, 0, 10).getTime();
+    await service.tick(); assert.equal(desktop.quotaCalls, calls);
     // 模拟整个调度器休眠到 00:25；服务端提前恢复，不修改原来的预计恢复时间。
     now = new Date(2026, 9, 26, 0, 25).getTime();
     desktop.quotaValue = exampleQuota(0, now + 3 * 3600000);
     await service.tick();
     assert.equal(desktop.quotaCalls, calls + 1); assert.equal(desktop.sends, 1);
+    assert.equal(service.snapshot().nextQuotaCheckAt, now + 600000);
     now += 2000; await service.tick(); assert.equal(desktop.quotaCalls, calls + 1);
   } finally { await cleanup(); }
 });
 
-test('预计时间到达仍受限时重新规划，手动刷新可提前查询但不能绕过额度判定', async () => {
+test('定期检查仍受限时继续等待，手动刷新可提前查询但不能绕过额度判定', async () => {
   let now = new Date(2026, 9, 26, 12).getTime();
   const { service, desktop, cleanup } = await setup(() => now);
   try {
@@ -159,9 +160,16 @@ test('额度配置兼容旧设置并重启保留，非法设置不能覆盖监�
     const { quotaCheck: _quotaCheck, ...legacy } = service.db.settings();
     service.db.db.prepare('UPDATE settings SET value=? WHERE id=1').run(JSON.stringify({ ...legacy, pollSeconds: 45 }));
     assert.deepEqual(service.db.settings().quotaCheck, defaultQuotaCheck);
-    const settings = { ...service.db.settings(), quotaCheck: { ...defaultQuotaCheck, mode: 'fixed' as const,
-      intervalSeconds: 120, recoveryDelayMinutes: 2, dailyResetCheck: false } };
+    service.db.db.prepare('UPDATE settings SET value=? WHERE id=1').run(JSON.stringify({ ...legacy, pollSeconds: 45,
+      quotaCheck: { mode: 'recovery', intervalSeconds: 60, recoveryDelayMinutes: 10, dailyResetCheck: true } }));
+    assert.deepEqual(service.db.settings().quotaCheck, { intervalSeconds: 600 });
+    service.db.db.prepare('UPDATE settings SET value=? WHERE id=1').run(JSON.stringify({ ...legacy, pollSeconds: 45,
+      quotaCheck: { mode: 'fixed', intervalSeconds: 120, recoveryDelayMinutes: 2, dailyResetCheck: true } }));
+    assert.deepEqual(service.db.settings().quotaCheck, { intervalSeconds: 120 });
+    const settings = { ...service.db.settings() };
     await service.command({ type: 'settings', value: settings });
+    const saved = JSON.parse(String(service.db.db.prepare('SELECT value FROM settings WHERE id=1').get()!.value));
+    assert.deepEqual(saved.quotaCheck, { intervalSeconds: 120 });
     await assert.rejects(service.command({ type: 'settings', value: { ...settings,
       quotaCheck: { ...settings.quotaCheck, intervalSeconds: 0 } } }), /额度查询设置无效/);
     assert.equal(service.db.settings().pollSeconds, 45);
@@ -175,17 +183,44 @@ test('额度配置兼容旧设置并重启保留，非法设置不能覆盖监�
   }
 });
 
-test('每日额外查询失败时清空旧额度并按兜底间隔重试，不按心跳反复查询', async () => {
+test('旧预计恢复任务重启后立即复查，并将数小时等待改为十分钟', async () => {
+  const now = new Date(2026, 9, 28, 12).getTime();
+  const { service, desktop, directory } = await setup(() => now);
+  let restored: MonitorService | undefined;
+  let stopped = false;
+  try {
+    await add(service, desktop); await service.tick(true);
+    const job = service.db.jobs()[0]!.job;
+    service.db.db.prepare('UPDATE settings SET value=? WHERE id=1').run(JSON.stringify({ ...service.db.settings(),
+      quotaCheck: { mode: 'recovery', intervalSeconds: 60, recoveryDelayMinutes: 10, dailyResetCheck: true } }));
+    job.nextCheckAt = now + 3 * 3600000; service.db.journal(job.id).save(job);
+    const calls = desktop.quotaCalls;
+    await service.stop(); stopped = true;
+    restored = new MonitorService(directory, () => desktop, () => now);
+    await restored.tick();
+    assert.equal(desktop.quotaCalls, calls + 1);
+    assert.deepEqual(restored.snapshot().settings.quotaCheck, { intervalSeconds: 600 });
+    assert.equal(restored.snapshot().nextQuotaCheckAt, now + 600000);
+    assert.equal(restored.db.tasks()[0]!.nextCheckAt, now + 600000);
+    assert.equal(restored.db.tasks()[0]!.enabled, true);
+    assert.equal(desktop.sends, 0);
+  } finally {
+    if (!stopped) await service.stop();
+    await restored?.stop(); rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('定期查询失败时清空旧额度并按十分钟间隔重试，不按心跳反复查询', async () => {
   let now = new Date(2026, 9, 26, 0, 9, 30).getTime();
   const { service, desktop, cleanup } = await setup(() => now);
   try {
     await add(service, desktop); await service.tick(true);
     const calls = desktop.quotaCalls;
-    now = new Date(2026, 9, 26, 0, 10).getTime();
+    now = service.snapshot().nextQuotaCheckAt!;
     desktop.quotaError = new Error('模拟额度查询超时');
     await service.tick();
     assert.equal(desktop.quotaCalls, calls + 1); assert.equal(service.snapshot().quota, null);
-    assert.equal(service.snapshot().nextQuotaCheckAt, now + 60000);
+    assert.equal(service.snapshot().nextQuotaCheckAt, now + 600000);
     for (const elapsed of [2000, 18000, 20000]) {
       now += elapsed; await service.tick();
       assert.equal(desktop.quotaCalls, calls + 1); assert.equal(desktop.sends, 0);

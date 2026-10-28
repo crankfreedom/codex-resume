@@ -115,6 +115,8 @@ try {
   await instance.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1000, 700));
   await window.screenshot({ path: join(artifacts, 'manual-narrow.png'), animations: 'disabled' });
   assert.equal(await window.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false);
+  // 缩窗可能保留滚动偏移；测量前回到页首，避免 hover 自动滚动被误判为正文重排。
+  await window.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }));
   const narrowBounds = await window.locator('.manual-article').boundingBox();
   await directoryTab.hover();
   await expect(directoryPanel).toBeVisible();
@@ -176,21 +178,13 @@ try {
   await window.getByRole('button', { name: '⚙ 应用设置' }).click();
   await window.getByRole('heading', { name: '监控与桌面' }).waitFor();
   const quotaSettings = window.locator('.quota-check-settings');
-  await expect(quotaSettings.getByRole('radio', { name: '按预计恢复时间', exact: true })).toBeChecked();
-  await window.locator('#quota-recovery-delay').fill('2');
-  await window.locator('#quota-recovery-delay').press('Tab');
-  await quotaSettings.getByText('固定时间间隔', { exact: true }).click();
-  await expect(quotaSettings.getByRole('radio', { name: '固定时间间隔', exact: true })).toBeChecked();
-  await expect(quotaSettings.getByRole('switch')).toBeChecked();
+  await expect(quotaSettings.getByRole('radio')).toHaveCount(0);
+  await expect(quotaSettings.getByRole('switch')).toHaveCount(0);
   await expect(window.locator('#quota-recovery-delay')).toHaveCount(0);
+  await expect(window.locator('#quota-check-interval')).toHaveValue('600');
+  await expect(quotaSettings.getByText('定期查询额度，默认每 10 分钟检查一次。', { exact: false })).toBeVisible();
   await window.locator('#quota-check-interval').fill('30');
   await window.locator('#quota-check-interval').press('Tab');
-  await quotaSettings.locator('.el-switch').click();
-  await expect(quotaSettings.getByRole('switch')).not.toBeChecked();
-  await quotaSettings.getByText('按预计恢复时间', { exact: true }).click();
-  await expect(quotaSettings.getByRole('switch')).not.toBeChecked();
-  await quotaSettings.getByText('固定时间间隔', { exact: true }).click();
-  await expect(quotaSettings.getByRole('switch')).not.toBeChecked();
   const switchControl = window.locator('.settings-card').filter({ has: window.getByRole('heading', { name: '监控与桌面', exact: true }) }).locator('.el-switch').first();
   await switchControl.click();
   await window.getByRole('button', { name: '保存设置' }).click();
@@ -198,7 +192,7 @@ try {
   snapshot = await window.evaluate(() => window.resume.snapshot());
   assert.equal(snapshot.settings.notifications, false);
   assert.equal(snapshot.settings.appearance.bodyFontSize, 20);
-  assert.deepEqual(snapshot.settings.quotaCheck, { mode: 'fixed', intervalSeconds: 30, recoveryDelayMinutes: 2, dailyResetCheck: false });
+  assert.deepEqual(snapshot.settings.quotaCheck, { intervalSeconds: 30 });
   await quotaSettings.screenshot({ path: join(artifacts, 'quota-settings.png'), animations: 'disabled' });
   await instance.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1000, 700));
   assert.equal(await window.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false);
@@ -214,9 +208,8 @@ try {
   assert.equal(snapshot.settings.notifications, false);
   assert.equal(snapshot.settings.appearance.bodyFontSize, 20);
   assert.equal(snapshot.settings.appearance.density, 'compact');
-  assert.equal(snapshot.settings.quotaCheck.mode, 'fixed');
-  assert.equal(snapshot.settings.quotaCheck.intervalSeconds, 30);
-  assert.equal(snapshot.settings.quotaCheck.dailyResetCheck, false);
+  assert.deepEqual(snapshot.settings.quotaCheck, { intervalSeconds: 30 });
+  await expect(window.locator('#quota-check-interval')).toHaveValue('30');
   await expect.poll(() => window.locator('h1').evaluate(element => getComputedStyle(element).fontSize)).toBe('34px');
   await window.screenshot({ path: join(artifacts, 'settings.png') });
   await window.getByRole('button', { name: '≡ 运行记录' }).click();
@@ -234,7 +227,7 @@ try {
   const result = { time: new Date().toISOString(), version, packaged: Boolean(executablePath), connection: snapshot.connection.state,
     logo: logoEvidence,
     threadCount: snapshot.threads.length, quotaWindows: snapshot.quota?.windows.length ?? 0,
-    checks: ['renderer', 'shared-logo-decoded', 'logo-source-hash', 'utility-process', 'sqlite', 'context-bridge', 'navigation', 'manual-menu', 'manual-hover-overlay-without-reflow', 'manual-directory-keyboard', 'manual-search-and-empty-state', 'manual-chapter-navigation', 'manual-narrow-layout', 'explicit-consent', 'appearance-preview-and-cancel', 'appearance-saved-across-pages', 'appearance-theme-and-density', 'appearance-persists-on-worker-restart', 'quota-mode-settings-and-persistence', 'settings', 'worker-crash-restart', 'tray-close', 'zero-task-sends'], errors };
+    checks: ['renderer', 'shared-logo-decoded', 'logo-source-hash', 'utility-process', 'sqlite', 'context-bridge', 'navigation', 'manual-menu', 'manual-hover-overlay-without-reflow', 'manual-directory-keyboard', 'manual-search-and-empty-state', 'manual-chapter-navigation', 'manual-narrow-layout', 'explicit-consent', 'appearance-preview-and-cancel', 'appearance-saved-across-pages', 'appearance-theme-and-density', 'appearance-persists-on-worker-restart', 'quota-periodic-default-600-and-persistence', 'settings', 'worker-crash-restart', 'tray-close', 'zero-task-sends'], errors };
   writeFileSync(join(artifacts, executablePath ? 'packaged-result.json' : 'result.json'), JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result, null, 2));
   await window.evaluate(() => window.resume.quit());

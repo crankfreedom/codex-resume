@@ -37,12 +37,12 @@ watch(() => chapter.value?.id, async () => {
         <h2>Codex Resume 使用说明书</h2>
         <p>从第一次托管，到额度恢复后的原会话续跑。共 {{ manualChapters.length }} 章，按当前实现逐项说明。</p>
       </div>
-      <div class="manual-edition">v{{ version }}<span>核对日期 2026-10-26</span></div>
+      <div class="manual-edition">v{{ version }}<span>核对日期 2026-10-28</span></div>
     </div>
 
     <div class="manual-live" aria-label="当前更新设置">
       <span>任务检查间隔 <strong>{{ snapshot ? `${snapshot.settings.pollSeconds} 秒` : '读取中' }}</strong></span>
-      <span>额度查询策略 <strong>{{ snapshot ? snapshot.settings.quotaCheck.mode === 'recovery' ? '按预计恢复时间' : '固定时间间隔' : '读取中' }}</strong></span>
+      <span>额度定期检查 <strong>{{ snapshot ? `每 ${snapshot.settings.quotaCheck.intervalSeconds} 秒` : '读取中' }}</strong></span>
       <span>本地状态快照 <strong>约 2 秒</strong></span>
       <span>总览额度最近读取 <strong>{{ checkedTime }}</strong></span>
       <span>下次额度查询 <strong>{{ snapshot?.nextQuotaCheckAt ? new Date(snapshot.nextQuotaCheckAt).toLocaleString('zh-CN', { hour12: false }) : '等待首次查询' }}</strong></span>

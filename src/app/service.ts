@@ -64,7 +64,7 @@ export class MonitorService {
       const gate = quotaGate(quota, 'codex', now);
       this.quota = { ...gate, checkedAt: now };
       this.quotaInTick = quota;
-      this.nextQuotaCheckAt = quotaCheckAt(gate, now, this.db.settings().quotaCheck);
+      this.nextQuotaCheckAt = quotaCheckAt(now, this.db.settings().quotaCheck);
     } catch (error) { this.disconnect(error); throw error; }
   }
   private disconnect(error: unknown) {
@@ -72,7 +72,7 @@ export class MonitorService {
     this.quota = null; this.quotaInTick = undefined;
     this.client?.close(); this.client = undefined;
     this.lastRefresh = this.now();
-    this.nextQuotaCheckAt = quotaCheckAt(null, this.now(), this.db.settings().quotaCheck);
+    this.nextQuotaCheckAt = quotaCheckAt(this.now(), this.db.settings().quotaCheck);
     if (!this.failedLogged) this.db.event(null, 'desktop_disconnected', { message: this.connection.message });
     this.failedLogged = true;
   }
@@ -153,7 +153,7 @@ export class MonitorService {
       },
     };
     return new ResumeEngine(job, guarded, { ...realClock, now: this.now }, this.db.journal(job.id),
-      (quota, now) => quotaCheckAt(quotaGate(quota, job.bucketId, now), now, this.db.settings().quotaCheck));
+      (_quota, now) => quotaCheckAt(now, this.db.settings().quotaCheck));
   }
   async command(command: Command) {
     if (this.stopping) throw new Error('监控进程正在退出');
@@ -171,7 +171,7 @@ export class MonitorService {
       const quotaCheck = s.quotaCheck === undefined ? previous.quotaCheck : validateQuotaCheck(s.quotaCheck);
       this.db.setSettings({ ...s, quotaCheck, appearance });
       if (JSON.stringify(previous.quotaCheck) !== JSON.stringify(quotaCheck)) {
-        this.nextQuotaCheckAt = this.quota ? quotaCheckAt(this.quota, this.now(), quotaCheck) : 0;
+        this.nextQuotaCheckAt = this.quota ? quotaCheckAt(this.now(), quotaCheck) : 0;
         for (const { job } of this.db.jobs()) if (job.phase === 'waiting_quota') {
           job.nextCheckAt = this.nextQuotaCheckAt; this.db.journal(job.id).save(job);
         }
