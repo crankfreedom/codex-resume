@@ -157,6 +157,8 @@ export class MonitorService {
   }
   async command(command: Command) {
     if (this.stopping) throw new Error('监控进程正在退出');
+    // 由 worker 返回新数据库快照，不查询额度或推进托管任务。
+    if (command.type === 'refreshData') return;
     if (command.type === 'refresh') { await this.tick(true); return; }
     if (command.type === 'settings') {
       const s = command.value;

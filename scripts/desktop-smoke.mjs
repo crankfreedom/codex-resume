@@ -194,6 +194,15 @@ try {
   assert.equal(snapshot.settings.appearance.bodyFontSize, 20);
   assert.deepEqual(snapshot.settings.quotaCheck, { intervalSeconds: 30 });
   await quotaSettings.screenshot({ path: join(artifacts, 'quota-settings.png'), animations: 'disabled' });
+  const localData = window.locator('.data-card');
+  const dataPreview = localData.getByLabel('最近事件数据');
+  await expect(dataPreview).toContainText('settings_updated');
+  await localData.getByRole('button', { name: '刷新数据', exact: true }).click();
+  await window.getByText('本机数据已刷新', { exact: true }).waitFor();
+  const dataEvents = JSON.parse(await dataPreview.textContent());
+  assert.ok(dataEvents.length > 0);
+  assert.ok(dataEvents.every(event => /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(event.time) && event.taskName === null));
+  await localData.screenshot({ path: join(artifacts, 'local-data.png'), animations: 'disabled' });
   await instance.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1000, 700));
   assert.equal(await window.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false);
   await instance.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1240, 850));
@@ -227,7 +236,7 @@ try {
   const result = { time: new Date().toISOString(), version, packaged: Boolean(executablePath), connection: snapshot.connection.state,
     logo: logoEvidence,
     threadCount: snapshot.threads.length, quotaWindows: snapshot.quota?.windows.length ?? 0,
-    checks: ['renderer', 'shared-logo-decoded', 'logo-source-hash', 'utility-process', 'sqlite', 'context-bridge', 'navigation', 'manual-menu', 'manual-hover-overlay-without-reflow', 'manual-directory-keyboard', 'manual-search-and-empty-state', 'manual-chapter-navigation', 'manual-narrow-layout', 'explicit-consent', 'appearance-preview-and-cancel', 'appearance-saved-across-pages', 'appearance-theme-and-density', 'appearance-persists-on-worker-restart', 'quota-periodic-default-600-and-persistence', 'settings', 'worker-crash-restart', 'tray-close', 'zero-task-sends'], errors };
+    checks: ['renderer', 'shared-logo-decoded', 'logo-source-hash', 'utility-process', 'sqlite', 'context-bridge', 'navigation', 'manual-menu', 'manual-hover-overlay-without-reflow', 'manual-directory-keyboard', 'manual-search-and-empty-state', 'manual-chapter-navigation', 'manual-narrow-layout', 'explicit-consent', 'appearance-preview-and-cancel', 'appearance-saved-across-pages', 'appearance-theme-and-density', 'appearance-persists-on-worker-restart', 'quota-periodic-default-600-and-persistence', 'local-data-live-preview-and-read-only-refresh', 'local-data-readable-time-and-null-app-task-name', 'settings', 'worker-crash-restart', 'tray-close', 'zero-task-sends'], errors };
   writeFileSync(join(artifacts, executablePath ? 'packaged-result.json' : 'result.json'), JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result, null, 2));
   await window.evaluate(() => window.resume.quit());

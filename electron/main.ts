@@ -7,6 +7,7 @@ import { writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { defaultSettings } from '../src/app/contracts.ts';
 import type { Command, Snapshot } from '../src/app/contracts.ts';
+import { eventsJsonl } from '../src/app/event-data.ts';
 import logoPath from '../resources/icons/logo.png?asset';
 
 const directory = dirname(fileURLToPath(import.meta.url));
@@ -129,7 +130,7 @@ else {
     ipcMain.handle('resume:snapshot', event => { trusted(event); return snapshot; });
     ipcMain.handle('resume:command', (event, value: Command) => {
       trusted(event);
-      if (!value || !['refresh', 'add', 'toggle', 'remove', 'reconcile', 'settings'].includes(value.type)) throw new Error('操作无效');
+      if (!value || !['refresh', 'refreshData', 'add', 'toggle', 'remove', 'reconcile', 'settings'].includes(value.type)) throw new Error('操作无效');
       return command(value);
     });
     ipcMain.handle('resume:directory', async event => { trusted(event); await shell.openPath(dataDirectory); });
@@ -137,7 +138,8 @@ else {
       trusted(event);
       const result = await dialog.showSaveDialog(window!, { title: '导出最近事件', defaultPath: 'codex-resume-events.jsonl', filters: [{ name: 'JSONL', extensions: ['jsonl'] }] });
       if (result.canceled || !result.filePath) return null;
-      await writeFile(result.filePath, snapshot.events.slice().reverse().map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
+      const latest = await command({ type: 'refreshData' });
+      await writeFile(result.filePath, eventsJsonl(latest.events), 'utf8');
       return result.filePath;
     });
     ipcMain.handle('resume:quit', event => { trusted(event); setTimeout(requestQuit, 0); });

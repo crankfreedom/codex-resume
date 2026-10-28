@@ -46,6 +46,50 @@ async function add(service: MonitorService, desktop: FakeDesktop) {
   return service.db.jobs()[0]!.job;
 }
 
+test('本机数据刷新读取新事件，不查询额度、不推进任务或投递', async () => {
+  const { service, desktop, cleanup } = await setup();
+  try {
+    const job = await add(service, desktop);
+    await service.tick(true);
+    const before = service.db.tasks();
+    const quotaCalls = desktop.quotaCalls;
+    desktop.quotaValue = exampleQuota(0, Date.now() + 3600000);
+    service.db.event(job.id, 'local_data_test', { nextCheckAt: Date.now() + 600000 });
+    const eventCount = service.db.events().length;
+    await service.command({ type: 'refreshData' });
+    assert.equal(service.snapshot().events[0]!.type, 'local_data_test');
+    assert.equal(service.snapshot().events[0]!.taskName, '测试长任务');
+    assert.equal(service.db.events().length, eventCount);
+    assert.deepEqual(service.db.tasks(), before);
+    assert.equal(desktop.quotaCalls, quotaCalls);
+    assert.equal(desktop.sends, 0);
+  } finally { await cleanup(); }
+});
+
+test('任务名写入事件，移除托管并重启后仍保留，应用事件名称为空', async () => {
+  const { service, desktop, directory } = await setup();
+  let restored: MonitorService | undefined;
+  let stopped = false;
+  try {
+    const job = await add(service, desktop);
+    await service.command({ type: 'toggle', id: job.id, enabled: false });
+    await service.command({ type: 'remove', id: job.id });
+    assert.equal(service.db.tasks().length, 0);
+    const events = service.db.events().filter(event => event.taskId === job.id);
+    assert.equal(events[0]!.type, 'task_removed');
+    assert.ok(events.length >= 3);
+    assert.ok(events.every(event => event.taskName === '测试长任务'));
+    assert.equal(service.db.events().find(event => event.taskId === null)!.taskName, null);
+    await service.stop(); stopped = true;
+    restored = new MonitorService(directory, () => desktop);
+    assert.deepEqual(restored.db.events().filter(event => event.taskId === job.id), events);
+    assert.equal(desktop.sends, 0);
+  } finally {
+    await restored?.stop(); if (!stopped) await service.stop();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('旧设置补齐外观，活动任务可保存外观，非法字号不能覆盖有效设置', async () => {
   const { service, desktop, directory } = await setup();
   let restored: MonitorService | undefined;

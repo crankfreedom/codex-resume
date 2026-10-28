@@ -5,8 +5,10 @@ import { useMonitor } from './store.ts';
 import ManualPage from './ManualPage.vue';
 import AppearanceSettings from './AppearanceSettings.vue';
 import QuotaCheckSettings from './QuotaCheckSettings.vue';
+import LocalDataSettings from './LocalDataSettings.vue';
 import { version as appVersion } from '../../package.json';
 import { defaultSettings } from '../../src/app/contracts.ts';
+import { formatDataTime, readableEvent } from '../../src/app/event-data.ts';
 import logoUrl from '../../resources/icons/logo.png?url';
 import type { ManagedTask, Settings, ThreadSummary } from '../../src/app/contracts.ts';
 
@@ -45,7 +47,7 @@ const reasonLabels: Record<string, string> = {
   monitoring_paused_before_send: '发送前托管已暂停', thread_identity_changed: '目标会话身份变化',
 };
 const reason = (value?: string) => value ? reasonLabels[value] ?? value : '';
-const time = (value?: number | null) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
+const time = (value?: number | null) => value ? formatDataTime(value) : '—';
 const remaining = (used?: number | null) => typeof used === 'number' && Number.isFinite(used) ? Math.max(0, Math.round(100 - used)) : null;
 const until = (value?: number | null) => {
   if (!value) return '恢复时间未知';
@@ -89,8 +91,6 @@ async function saveSettings() {
   const appearance = { ...(s.value?.settings.appearance ?? defaultSettings.appearance) };
   if (await store.command({ type: 'settings', value: { ...settings.value, appearance } })) ElMessage.success('设置已保存');
 }
-const openDirectory = () => window.resume.openDataDirectory();
-const quit = () => window.resume.quit();
 </script>
 
 <template>
@@ -122,9 +122,9 @@ const quit = () => window.resume.quit();
         <div class="section-heading"><h2>从 Codex 选择会话</h2><el-input v-model="search" placeholder="搜索会话名称或目录" clearable class="search" /></div><section class="card thread-list"><div v-if="!threads.length" class="empty compact"><div class="empty-icon">▤</div><h3>{{ s?.connection.state === 'connected' ? '没有匹配的本机会话' : '连接 Codex 后显示会话' }}</h3><p>显示本机最近 50 条及置顶会话，可通过顶部刷新更新。</p></div><div v-for="thread in threads" :key="thread.id" class="thread-row"><div class="task-avatar subtle">↗</div><div class="task-main"><h3>{{ thread.title }}</h3><p>{{ thread.cwd || thread.id }}</p></div><span class="muted thread-status">{{ thread.status === 'active' ? '运行中' : thread.status === 'idle' ? '空闲' : thread.status }}</span><el-button :disabled="tasks.some(t => t.targetThreadId === thread.id && t.enabled) || store.busy" @click="choose(thread)">{{ tasks.some(t => t.targetThreadId === thread.id && t.enabled) ? '已托管' : '托管会话' }}</el-button></div></section>
       </template>
 
-      <template v-if="page === 'events'"><div class="section-heading"><h2>最近事件 <span>{{ s?.events.length ?? 0 }}</span></h2><el-button @click="exportEvents">导出 JSONL</el-button></div><section class="card event-list"><div v-if="!s?.events.length" class="small-empty">暂无运行记录</div><div v-for="event in s?.events" :key="event.id" class="event-row"><span class="event-dot" :class="event.type"></span><div><h3>{{ eventLabels[event.type] ?? event.type }}<code>#{{ event.id }}</code></h3><p>{{ event.taskId ? tasks.find(t => t.id === event.taskId)?.title ?? event.taskId.slice(0, 8) : '应用' }}<span v-if="event.details.reason"> · {{ reason(String(event.details.reason)) }}</span></p><details><summary>查看详情</summary><pre>{{ JSON.stringify(event.details, null, 2) }}</pre></details></div><time>{{ time(event.time) }}</time></div></section><p class="footnote">显示最近 150 条事件；完整事件和发送记录保存在本机 SQLite 数据库中。</p></template>
+      <template v-if="page === 'events'"><div class="section-heading"><h2>最近事件 <span>{{ s?.events.length ?? 0 }}</span></h2><el-button @click="exportEvents">导出 JSONL</el-button></div><section class="card event-list"><div v-if="!s?.events.length" class="small-empty">暂无运行记录</div><div v-for="event in s?.events" :key="event.id" class="event-row"><span class="event-dot" :class="event.type"></span><div><h3>{{ eventLabels[event.type] ?? event.type }}<code>#{{ event.id }}</code></h3><p>{{ event.taskName ?? (event.taskId ? tasks.find(t => t.id === event.taskId)?.title ?? event.taskId.slice(0, 8) : '应用') }}<span v-if="event.details.reason"> · {{ reason(String(event.details.reason)) }}</span></p><details><summary>查看详情</summary><pre>{{ JSON.stringify(readableEvent(event).details, null, 2) }}</pre></details></div><time>{{ time(event.time) }}</time></div></section><p class="footnote">显示最近 150 条事件；完整事件和发送记录保存在本机 SQLite 数据库中。</p></template>
 
-      <template v-if="page === 'settings'"><AppearanceSettings /><section class="card settings-card"><QuotaCheckSettings v-model="settings.quotaCheck" :next-check-at="s?.nextQuotaCheckAt ?? null" /></section><section class="card settings-card"><h2>监控与桌面</h2><div class="setting-row"><div><strong>任务检查间隔</strong><p>刷新会话列表并检查托管状态；额度查询使用上方独立策略。</p></div><el-input-number v-model="settings.pollSeconds" :min="10" :max="300" :step="5" /><span>秒</span></div><div class="setting-row"><div><strong>桌面通知</strong><p>额度停止、续跑提交、完成或需要处理时通知。</p></div><el-switch v-model="settings.notifications" /></div><div class="setting-row"><div><strong>关闭窗口后保留托盘</strong><p>从托盘选择“退出并停止监控”才会结束进程。</p></div><el-switch v-model="settings.closeToTray" /></div><h2 class="advanced-title">连接参数 <small>通常无需填写</small></h2><el-form label-position="top"><el-form-item label="调用会话 ID"><el-input v-model="settings.callerThreadId" placeholder="留空：从本机 Codex 会话索引自动发现" /></el-form-item><el-form-item label="桌面工具管道"><el-input v-model="settings.pipe" placeholder="留空：自动发现唯一的 Codex 桌面管道" /></el-form-item></el-form><p class="muted">连接依赖当前 Codex 桌面版本的内部工具桥接；升级后若不兼容，应用会停止发送并显示错误。</p><el-button type="primary" :loading="store.busy" @click="saveSettings">保存设置</el-button></section><section class="card settings-card data-card"><h2>本机数据</h2><p>任务、设置、发送意图与事件保存在：</p><code>{{ s?.dataDirectory ?? '正在初始化' }}</code><div><el-button @click="openDirectory">打开数据目录</el-button><el-button @click="exportEvents">导出最近事件</el-button><el-button text type="danger" @click="quit">退出并停止监控</el-button></div></section></template>
+      <template v-if="page === 'settings'"><AppearanceSettings /><section class="card settings-card"><QuotaCheckSettings v-model="settings.quotaCheck" :next-check-at="s?.nextQuotaCheckAt ?? null" /></section><section class="card settings-card"><h2>监控与桌面</h2><div class="setting-row"><div><strong>任务检查间隔</strong><p>刷新会话列表并检查托管状态；额度查询使用上方独立策略。</p></div><el-input-number v-model="settings.pollSeconds" :min="10" :max="300" :step="5" /><span>秒</span></div><div class="setting-row"><div><strong>桌面通知</strong><p>额度停止、续跑提交、完成或需要处理时通知。</p></div><el-switch v-model="settings.notifications" /></div><div class="setting-row"><div><strong>关闭窗口后保留托盘</strong><p>从托盘选择“退出并停止监控”才会结束进程。</p></div><el-switch v-model="settings.closeToTray" /></div><h2 class="advanced-title">连接参数 <small>通常无需填写</small></h2><el-form label-position="top"><el-form-item label="调用会话 ID"><el-input v-model="settings.callerThreadId" placeholder="留空：从本机 Codex 会话索引自动发现" /></el-form-item><el-form-item label="桌面工具管道"><el-input v-model="settings.pipe" placeholder="留空：自动发现唯一的 Codex 桌面管道" /></el-form-item></el-form><p class="muted">连接依赖当前 Codex 桌面版本的内部工具桥接；升级后若不兼容，应用会停止发送并显示错误。</p><el-button type="primary" :loading="store.busy" @click="saveSettings">保存设置</el-button></section><LocalDataSettings /></template>
       <ManualPage v-if="page === 'guide'" :snapshot="s" />
     </main>
 

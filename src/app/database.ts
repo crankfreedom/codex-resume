@@ -20,8 +20,16 @@ export class AppDatabase {
       CREATE TABLE IF NOT EXISTS attempts (marker TEXT PRIMARY KEY, task_id TEXT NOT NULL,
         created INTEGER NOT NULL, phase TEXT NOT NULL, turn_id TEXT);
       CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL,
-        task_id TEXT, type TEXT NOT NULL, details TEXT NOT NULL);
-      PRAGMA user_version=1;`);
+        task_id TEXT, type TEXT NOT NULL, details TEXT NOT NULL, task_name TEXT);`);
+    if (!this.db.prepare('PRAGMA table_info(events)').all().some(column => column.name === 'task_name')) {
+      this.db.exec('BEGIN IMMEDIATE');
+      try {
+        this.db.exec(`ALTER TABLE events ADD COLUMN task_name TEXT;
+          UPDATE events SET task_name=(SELECT title FROM tasks WHERE tasks.id=events.task_id);
+          COMMIT;`);
+      } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    }
+    this.db.exec('PRAGMA user_version=2');
   }
   settings(): Settings {
     const row = this.db.prepare('SELECT value FROM settings WHERE id=1').get();
@@ -46,8 +54,8 @@ export class AppDatabase {
     this.event(id, enabled ? 'monitoring_enabled' : 'monitoring_paused');
   }
   remove(id: string) {
-    this.db.prepare('DELETE FROM tasks WHERE id=? AND enabled=0').run(id);
-    this.event(id, 'task_removed');
+    const row = this.db.prepare('DELETE FROM tasks WHERE id=? AND enabled=0 RETURNING title').get(id);
+    if (row) this.event(id, 'task_removed', {}, String(row.title));
   }
   error(id: string, message: string | null) {
     this.db.prepare('UPDATE tasks SET last_error=? WHERE id=?').run(message, id);
@@ -67,13 +75,15 @@ export class AppDatabase {
       event: (type, details) => this.event(id, type, details),
     };
   }
-  event(taskId: string | null, type: string, details: Record<string, unknown> = {}) {
-    this.db.prepare('INSERT INTO events(time,task_id,type,details) VALUES(?,?,?,?)')
-      .run(Date.now(), taskId, type, JSON.stringify(details));
+  event(taskId: string | null, type: string, details: Record<string, unknown> = {}, taskName?: string) {
+    const name = taskName ?? (taskId ? this.db.prepare('SELECT title FROM tasks WHERE id=?').get(taskId)?.title : null);
+    this.db.prepare('INSERT INTO events(time,task_id,task_name,type,details) VALUES(?,?,?,?,?)')
+      .run(Date.now(), taskId, name == null ? null : String(name), type, JSON.stringify(details));
   }
   events(limit = 150): EventRow[] {
     return this.db.prepare('SELECT * FROM events ORDER BY id DESC LIMIT ?').all(limit).map(row => ({
       id: Number(row.id), time: Number(row.time), taskId: row.task_id == null ? null : String(row.task_id),
+      taskName: row.task_name == null ? null : String(row.task_name),
       type: String(row.type), details: JSON.parse(String(row.details)),
     }));
   }

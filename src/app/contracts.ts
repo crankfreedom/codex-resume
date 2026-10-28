@@ -12,7 +12,7 @@ export interface ManagedTask {
   resumeCount: number; maxResumes: number; prompt: string; lastError?: string;
   evidence: { serverLimitObserved: boolean; serverQuotaBlockedObserved?: boolean; serverRecoveryObserved: boolean; sameThreadReply: boolean };
 }
-export interface EventRow { id: number; time: number; taskId: string | null; type: string; details: Record<string, unknown> }
+export interface EventRow { id: number; time: number; taskId: string | null; taskName: string | null; type: string; details: Record<string, unknown> }
 export interface Snapshot {
   connection: { state: 'connecting' | 'connected' | 'disconnected'; message: string; checkedAt: number | null };
   quota: { available: boolean; reason: string; windows: Array<QuotaWindow | null>; checkedAt: number } | null;
@@ -23,6 +23,7 @@ export interface Snapshot {
 }
 export type Command =
   | { type: 'refresh' }
+  | { type: 'refreshData' }
   | { type: 'add'; targetThreadId: string; prompt: string; maxResumes: number }
   | { type: 'toggle'; id: string; enabled: boolean }
   | { type: 'reconcile'; id: string }
