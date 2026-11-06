@@ -8,9 +8,12 @@ import { MonitorService } from '../src/app/service.ts';
 import { exampleQuota } from '../src/scenarios.ts';
 import { appearanceThemes, defaultAppearance, normalizeAppearance } from '../src/app/appearance.ts';
 import { defaultQuotaCheck } from '../src/app/quota-schedule.ts';
-import type { Job, ThreadView } from '../src/domain.ts';
+import type { CurrentGoal, Job, ThreadView } from '../src/domain.ts';
 
 class FakeDesktop {
+  goal: CurrentGoal | null = null;
+  goalError?: Error;
+  readGoal() { if (this.goalError) throw this.goalError; return structuredClone(this.goal); }
   caller = randomUUID();
   target = randomUUID();
   view: ThreadView = { thread: { id: this.target, status: { type: 'idle' } }, turns: [{ id: 'blocked', status: 'failed', error: { code: 'UsageLimitExceeded' } }] };
@@ -23,8 +26,8 @@ class FakeDesktop {
   async quota() { this.quotaCalls++; if (this.quotaError) throw this.quotaError; return structuredClone(this.quotaValue); }
   async call<T>() { return { pinnedThreads: [], threads: [{ id: this.target, title: '测试长任务', kind: 'codex', hostId: 'local', status: { type: 'idle' } }] } as T; }
   async readThread() { await this.afterRead?.(); return structuredClone(this.view); }
-  async send(_id: string, prompt: string) {
-    this.onSend?.(); this.sends++;
+  async send(_id: string, prompt: string, beforeDispatch?: () => void) {
+    this.onSend?.(); beforeDispatch?.(); this.sends++;
     this.view.turns.unshift({ id: 'sent-' + this.sends, status: 'completed', items: [
       { type: 'functionCallOutput', namespace: 'codex_app', name: 'send_message_to_thread', output: { text: prompt } },
       { type: 'agentMessage', text: '业务完成' },
@@ -36,7 +39,7 @@ async function setup(now?: () => number) {
   const directory = mkdtempSync(join(tmpdir(), 'codex-resume-test-'));
   const desktop = new FakeDesktop();
   if (now) desktop.quotaValue = exampleQuota(100, now() + 3 * 3600000);
-  const service = new MonitorService(directory, () => desktop, now);
+  const service = new MonitorService(directory, () => desktop, now, () => desktop.readGoal());
   service.db.setSettings({ ...service.db.settings(), callerThreadId: desktop.caller });
   await service.tick(true);
   return { directory, desktop, service, cleanup: async () => { await service.stop(); rmSync(directory, { recursive: true, force: true }); } };
@@ -45,6 +48,201 @@ async function add(service: MonitorService, desktop: FakeDesktop) {
   await service.command({ type: 'add', targetThreadId: desktop.target, prompt: '继续已授权任务', maxResumes: 3 });
   return service.db.jobs()[0]!.job;
 }
+
+test('加入时实时拒绝普通已完成任务，列表摘要过期也不能绕过', async () => {
+  const { service, desktop, cleanup } = await setup();
+  try {
+    desktop.view.turns = [{ id: 'done', status: 'completed' }];
+    await assert.rejects(add(service, desktop), /该任务已经完成，无法加入托管列表/);
+    assert.equal(service.snapshot().tasks.length, 0); assert.equal(desktop.sends, 0);
+    assert.equal(service.db.events().some(e => e.type === 'monitoring_enabled'), false);
+    desktop.view.turns[0]!.status = 'inProgress'; desktop.view.thread.status.type = 'active';
+    await add(service, desktop);
+    assert.equal(service.snapshot().tasks.length, 1, '校验失败后仍可重新加入未完成任务');
+  } finally { await cleanup(); }
+});
+
+test('未结束 Goal 的单轮完成可以托管，主动暂停、受阻和自身预算不会自动续跑', async () => {
+  for (const status of ['active', 'usage_limited', 'paused', 'blocked', 'budget_limited'] as const) {
+    const { service, desktop, cleanup } = await setup();
+    try {
+      desktop.goal = { id: 'goal-1', status };
+      desktop.view.turns = [{ id: 'done-round', status: 'completed' }];
+      await add(service, desktop); await service.tick(true);
+      assert.equal(service.snapshot().tasks.length, 1, status);
+      assert.equal(service.snapshot().tasks[0]!.enabled, ['active', 'usage_limited'].includes(status));
+      assert.equal(desktop.sends, 0);
+    } finally { await cleanup(); }
+  }
+  const { service, desktop, cleanup } = await setup();
+  try {
+    desktop.goal = { id: 'paused-goal', status: 'paused' };
+    desktop.quotaValue = exampleQuota(0, Date.now());
+    await add(service, desktop); await service.tick(true);
+    assert.equal(desktop.sends, 0, '即使最新轮次为额度失败，也不能恢复主动暂停的 Goal');
+    assert.equal(service.snapshot().tasks[0]!.reason, 'goal_paused');
+  } finally { await cleanup(); }
+});
+
+test('Goal 多轮续跑后保留托管，Goal 消失且最新轮次正常结束时自动移除并保留日志和尝试', async () => {
+  const { service, desktop, cleanup } = await setup();
+  try {
+    desktop.goal = { id: 'goal-1', status: 'active' };
+    const job = await add(service, desktop); await service.tick(true);
+    desktop.quotaValue = exampleQuota(0, Date.now());
+    await service.tick(true); await service.tick(true);
+    assert.equal(service.snapshot().tasks[0]!.phase, 'observing');
+    assert.equal(service.snapshot().tasks[0]!.resumeCount, 1);
+    assert.equal(service.db.db.prepare('SELECT phase FROM attempts WHERE task_id=?').get(job.id)?.phase, 'completed');
+    desktop.view.turns.unshift({ id: 'goal-next-round', status: 'failed', error: { code: 'UsageLimitExceeded' } });
+    await service.tick(true); await service.tick(true);
+    assert.equal(desktop.sends, 2);
+    assert.equal(service.snapshot().tasks.length, 1);
+    desktop.goal = null;
+    await service.tick(true);
+    assert.equal(service.snapshot().tasks.length, 0);
+    const removed = service.db.events().filter(e => e.type === 'task_removed');
+    assert.equal(removed.length, 1); assert.equal(removed[0]!.taskName, '测试长任务');
+    assert.equal(removed[0]!.details.automatic, true);
+    assert.equal(service.db.db.prepare('SELECT COUNT(*) AS n FROM attempts WHERE task_id=? AND phase=?').get(job.id, 'completed')?.n, 2);
+    await service.tick(true); assert.equal(desktop.sends, 2);
+    assert.equal(service.db.events().filter(e => e.type === 'task_removed').length, 1);
+  } finally { await cleanup(); }
+});
+
+test('Goal 消失但最新轮次仍运行或失败时保留任务，Goal 更换也不沿用旧授权发送', async () => {
+  for (const status of ['inProgress', 'failed', 'interrupted'] as const) {
+    const { service, desktop, cleanup } = await setup();
+    try {
+      desktop.goal = { id: 'goal-1', status: 'active' };
+      await add(service, desktop); await service.tick(true);
+      desktop.goal = null; desktop.view.turns[0]!.status = status;
+      desktop.view.thread.status.type = status === 'inProgress' ? 'active' : 'idle';
+      desktop.quotaValue = exampleQuota(0, Date.now());
+      await service.tick(true);
+      assert.equal(service.snapshot().tasks.length, 1);
+      assert.equal(service.snapshot().tasks[0]!.reason, 'goal_changed_or_cleared');
+      assert.equal(desktop.sends, 0);
+    } finally { await cleanup(); }
+  }
+  const { service, desktop, cleanup } = await setup();
+  try {
+    desktop.goal = { id: 'goal-1', status: 'active' }; await add(service, desktop);
+    desktop.goal = { id: 'goal-2', status: 'active' }; desktop.quotaValue = exampleQuota(0, Date.now());
+    await service.tick(true);
+    assert.equal(service.snapshot().tasks[0]!.reason, 'goal_changed_or_cleared'); assert.equal(desktop.sends, 0);
+  } finally { await cleanup(); }
+});
+
+test('Goal 读取失败和读取期间身份变化时不创建、删除或发送', async () => {
+  const { service, desktop, cleanup } = await setup();
+  try {
+    desktop.goalError = new Error('Goal 读取失败');
+    await assert.rejects(add(service, desktop), /Goal 读取失败/);
+    assert.equal(service.snapshot().tasks.length, 0);
+    desktop.goalError = undefined;
+    await add(service, desktop); await service.tick(true);
+    desktop.goalError = new Error('Goal 读取失败'); desktop.quotaValue = exampleQuota(0, Date.now());
+    await service.tick(true);
+    assert.equal(service.snapshot().tasks.length, 1); assert.equal(desktop.sends, 0);
+    desktop.goalError = undefined;
+    desktop.afterRead = async () => { desktop.goal = { id: 'new-goal', status: 'active' }; };
+    await service.tick(true);
+    assert.match(service.snapshot().tasks[0]!.lastError!, /读取期间 Goal 已变化/);
+    assert.equal(desktop.sends, 0);
+  } finally { await cleanup(); }
+});
+
+test('发送前复查发现 Goal 主动暂停时取消投递', async () => {
+  const { service, desktop, cleanup } = await setup();
+  try {
+    desktop.goal = { id: 'goal-1', status: 'active' }; await add(service, desktop);
+    desktop.quotaValue = exampleQuota(0, Date.now());
+    let reads = 0;
+    desktop.afterRead = async () => { if (++reads === 2) desktop.goal!.status = 'paused'; };
+    await service.tick(true);
+    assert.equal(desktop.sends, 0); assert.equal(service.snapshot().tasks[0]!.reason, 'goal_paused');
+  } finally { await cleanup(); }
+});
+
+test('Goal 跨正常完成轮次仍受累计续跑次数上限约束', async () => {
+  const { service, desktop, cleanup } = await setup();
+  try {
+    desktop.goal = { id: 'goal-1', status: 'active' };
+    const job = await add(service, desktop); job.maxResumes = 1; service.db.journal(job.id).save(job);
+    desktop.quotaValue = exampleQuota(0, Date.now());
+    await service.tick(true); await service.tick(true);
+    desktop.view.turns.unshift({ id: 'goal-next-failure', status: 'failed', error: { code: 'UsageLimitExceeded' } });
+    await service.tick(true); await service.tick(true);
+    assert.equal(desktop.sends, 1); assert.equal(service.snapshot().tasks[0]!.reason, 'resume_limit_reached');
+    assert.equal(service.snapshot().tasks[0]!.enabled, false);
+  } finally { await cleanup(); }
+});
+
+test('发送已准备好但尚未派发时再次核对 Goal，暂停或源库失败都取消且扣回次数', async () => {
+  for (const failure of ['paused', 'unavailable']) {
+    const { service, desktop, cleanup } = await setup();
+    try {
+      desktop.goal = { id: 'goal-1', status: 'active' }; await add(service, desktop);
+      desktop.quotaValue = exampleQuota(0, Date.now());
+      desktop.onSend = () => {
+        if (failure === 'paused') desktop.goal!.status = 'paused';
+        else desktop.goalError = new Error('Goal 源库不可用');
+      };
+      await service.tick(true);
+      assert.equal(desktop.sends, 0);
+      assert.equal(service.snapshot().tasks[0]!.resumeCount, 0);
+      assert.equal(service.snapshot().tasks[0]!.reason, failure === 'paused' ? 'goal_paused' : 'goal_state_unavailable');
+    } finally { await cleanup(); }
+  }
+});
+
+test('旧版 completed 记录重启后重新校验，未结束 Goal 不被误删', async () => {
+  for (const goal of [null, { id: 'unfinished-goal', status: 'active' as const }]) {
+    const { service, desktop, directory } = await setup();
+    let restored: MonitorService | undefined;
+    try {
+      const job = await add(service, desktop); job.phase = 'completed';
+      service.db.journal(job.id).save(job); service.db.toggle(job.id, false);
+      desktop.goal = goal; desktop.view.turns = [{ id: 'done-round', status: 'completed' }];
+      await service.stop();
+      restored = new MonitorService(directory, () => desktop, undefined, () => desktop.readGoal());
+      await restored.tick(true);
+      assert.equal(restored.snapshot().tasks.length, goal ? 1 : 0);
+      if (goal) {
+        assert.equal(restored.snapshot().tasks[0]!.phase, 'observing');
+        assert.equal(restored.snapshot().tasks[0]!.enabled, false);
+      }
+    } finally { await restored?.stop(); rmSync(directory, { recursive: true, force: true }); }
+  }
+});
+
+test('本次续跑轮次已完成但最新人工轮次仍运行时不自动移除', async () => {
+  const { service, desktop, cleanup } = await setup();
+  try {
+    await add(service, desktop); desktop.quotaValue = exampleQuota(0, Date.now());
+    await service.tick(true);
+    desktop.view.turns.unshift({ id: 'manual-running', status: 'inProgress' });
+    desktop.view.thread.status.type = 'active';
+    await service.tick(true);
+    assert.equal(service.snapshot().tasks.length, 1);
+    assert.equal(service.snapshot().tasks[0]!.reason, 'thread_changed_since_resume');
+    assert.equal(desktop.sends, 1);
+  } finally { await cleanup(); }
+});
+
+test('人工核对发送回执确认当前任务完成时同样自动移除，不重新投递', async () => {
+  const { service, desktop, cleanup } = await setup();
+  try {
+    const job = await add(service, desktop);
+    job.phase = 'send_uncertain'; job.resumeCount = 1; job.sentAt = Date.now();
+    service.db.journal(job.id).save(job); service.db.toggle(job.id, false);
+    desktop.view.turns.unshift({ id: 'received', status: 'completed', items: [{ type: 'userMessage', text: job.marker }] });
+    await service.command({ type: 'reconcile', id: job.id });
+    assert.equal(service.snapshot().tasks.length, 0); assert.equal(desktop.sends, 0);
+    assert.equal(service.db.events().find(e => e.type === 'task_removed')?.details.automatic, true);
+  } finally { await cleanup(); }
+});
 
 test('10 秒额度查询照常执行，重复额度分段合并，变化和恢复立即记录且只发送一次', async () => {
   const start = 1800000000000; let now = start;
@@ -76,8 +274,8 @@ test('10 秒额度查询照常执行，重复额度分段合并，变化和恢�
     assert.equal(checks().length, 4); assert.equal(checks()[0]!.details.available, true);
     assert.equal(desktop.sends, 1);
     now += 10000; await service.tick();
-    assert.equal(service.db.tasks()[0]!.phase, 'completed');
-    assert.equal(service.db.tasks()[0]!.enabled, false);
+    assert.equal(service.db.tasks().length, 0);
+    assert.equal(service.db.events().find(e => e.type === 'task_removed')?.details.automatic, true);
     assert.equal(desktop.sends, 1);
   } finally { await cleanup(); }
 });
@@ -98,12 +296,11 @@ test('快照分别暴露未匹配和已匹配的续跑轮次，长任务继续�
     await service.tick(true); assert.equal(desktop.sends, 1);
     desktop.view.turns[0]!.status = 'completed'; desktop.view.thread.status.type = 'idle';
     await service.tick(true);
-    assert.equal(service.snapshot().tasks[0]!.phase, 'completed');
-    assert.equal(service.snapshot().tasks[0]!.evidence.sameThreadReply, true);
+    assert.equal(service.snapshot().tasks.length, 0);
+    assert.equal((service.db.events().find(e => e.type === 'completed')!.details.evidence as Job['evidence']).sameThreadReply, true);
     assert.equal(desktop.sends, 1);
   } finally { await cleanup(); }
 });
-
 
 test('本机数据刷新读取新事件，不查询额度、不推进任务或投递', async () => {
   const { service, desktop, cleanup } = await setup();
@@ -140,7 +337,7 @@ test('任务名写入事件，移除托管并重启后仍保留，应用事件�
     assert.ok(events.every(event => event.taskName === '测试长任务'));
     assert.equal(service.db.events().find(event => event.taskId === null)!.taskName, null);
     await service.stop(); stopped = true;
-    restored = new MonitorService(directory, () => desktop);
+    restored = new MonitorService(directory, () => desktop, undefined, () => desktop.readGoal());
     assert.deepEqual(restored.db.events().filter(event => event.taskId === job.id), events);
     assert.equal(desktop.sends, 0);
   } finally {
@@ -184,7 +381,7 @@ test('旧设置补齐外观，20 种主题可保存，非法外观不能覆盖�
     assert.equal(service.db.settings().appearance.bodyFontSize, 20);
     assert.equal(desktop.sends, 0);
     await service.stop(); stopped = true;
-    restored = new MonitorService(directory, () => desktop);
+    restored = new MonitorService(directory, () => desktop, undefined, () => desktop.readGoal());
     assert.deepEqual(restored.db.settings().appearance, settings.appearance);
     assert.equal(restored.db.enabled(job.id), true);
   } finally {
@@ -212,8 +409,8 @@ test('默认十分钟检查不受三小时恢复时间约束，共用新额度�
     assert.equal(desktop.quotaCalls, calls + 1, '总览与等待任务应共用本轮新查询');
     assert.equal(desktop.sends, 1);
     now += 16000; await service.tick();
-    assert.equal(service.db.tasks()[0]!.phase, 'completed');
-    assert.equal(service.db.tasks()[0]!.enabled, false);
+    assert.equal(service.db.tasks().length, 0);
+    assert.equal(service.db.events().find(e => e.type === 'task_removed')?.details.automatic, true);
     now += 5 * 3600000; await service.tick();
     assert.equal(desktop.sends, 1);
   } finally { await cleanup(); }
@@ -292,7 +489,7 @@ test('额度配置兼容旧设置并重启保留，非法设置不能覆盖监�
     assert.equal(service.db.settings().pollSeconds, 45);
     assert.deepEqual(service.db.settings().appearance, settings.appearance);
     await service.stop(); stopped = true;
-    restored = new MonitorService(directory, () => desktop);
+    restored = new MonitorService(directory, () => desktop, undefined, () => desktop.readGoal());
     assert.deepEqual(restored.db.settings().quotaCheck, settings.quotaCheck);
   } finally {
     if (!stopped) await service.stop();
@@ -313,7 +510,7 @@ test('旧预计恢复任务重启后立即复查，并将数小时等待改为�
     job.nextCheckAt = now + 3 * 3600000; service.db.journal(job.id).save(job);
     const calls = desktop.quotaCalls;
     await service.stop(); stopped = true;
-    restored = new MonitorService(directory, () => desktop, () => now);
+    restored = new MonitorService(directory, () => desktop, () => now, () => desktop.readGoal());
     await restored.tick();
     assert.equal(desktop.quotaCalls, calls + 1);
     assert.deepEqual(restored.snapshot().settings.quotaCheck, { intervalSeconds: 600 });
@@ -361,9 +558,9 @@ test('SQLite 托管经过耗尽、等待、恢复与原会话回执，并先提�
       assert.equal(service.db.db.prepare('SELECT phase FROM attempts WHERE task_id=?').get(job.id)?.phase, 'sending');
     };
     await service.tick(true); await service.tick(true);
-    assert.equal(desktop.sends, 1); assert.equal(service.db.tasks()[0]!.phase, 'completed');
-    assert.equal(service.db.tasks()[0]!.enabled, false);
-    assert.equal(service.db.tasks()[0]!.evidence.sameThreadReply, true);
+    assert.equal(desktop.sends, 1); assert.equal(service.db.tasks().length, 0);
+    assert.equal((service.db.events().find(e => e.type === 'completed')!.details.evidence as Job['evidence']).sameThreadReply, true);
+    assert.equal(service.db.db.prepare('SELECT phase FROM attempts WHERE task_id=?').get(job.id)?.phase, 'completed');
     assert.ok(!JSON.stringify(service.snapshot()).includes('accountId'));
   } finally { await cleanup(); }
 });
@@ -385,7 +582,7 @@ test('发送中崩溃后重新打开数据库，作业转入待核对且不会�
   await add(service, desktop);
   const job = service.db.jobs()[0]!.job; job.phase = 'sending'; job.resumeCount = 1;
   service.db.journal(job.id).save(job); await service.stop();
-  const restored = new MonitorService(directory, () => desktop);
+  const restored = new MonitorService(directory, () => desktop, undefined, () => desktop.readGoal());
   try {
     assert.equal(restored.db.tasks()[0]!.phase, 'send_uncertain');
     assert.equal(restored.db.tasks()[0]!.enabled, false);
@@ -426,7 +623,7 @@ test('暂停标志不会被晚到的引擎存盘覆盖，设置和记录重启�
   const job: Job = await add(service, desktop);
   service.db.toggle(job.id, false); service.db.journal(job.id).save(job);
   await service.stop();
-  const restored = new MonitorService(directory, () => desktop);
+  const restored = new MonitorService(directory, () => desktop, undefined, () => desktop.readGoal());
   try {
     assert.equal(restored.db.tasks()[0]!.enabled, false);
     assert.equal(restored.db.settings().callerThreadId, desktop.caller);

@@ -58,6 +58,14 @@ export class AppDatabase {
     const row = this.db.prepare('DELETE FROM tasks WHERE id=? AND enabled=0 RETURNING title').get(id);
     if (row) this.event(id, 'task_removed', {}, String(row.title));
   }
+  removeCompleted(id: string) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const row = this.db.prepare("DELETE FROM tasks WHERE id=? AND json_extract(job,'$.phase')='completed' RETURNING title").get(id);
+      if (row) this.event(id, 'task_removed', { reason: 'completed', automatic: true }, String(row.title));
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
   error(id: string, message: string | null) {
     this.db.prepare('UPDATE tasks SET last_error=? WHERE id=?').run(message, id);
   }
@@ -69,7 +77,7 @@ export class AppDatabase {
           this.db.prepare('UPDATE tasks SET job=?,updated=? WHERE id=?').run(JSON.stringify(job), Date.now(), id);
           if (job.phase === 'sending' || this.db.prepare('SELECT marker FROM attempts WHERE marker=?').get(job.marker)) this.db.prepare(`INSERT INTO attempts VALUES(?,?,?,?,?)
             ON CONFLICT(marker) DO UPDATE SET phase=excluded.phase,turn_id=excluded.turn_id`)
-            .run(job.marker, id, Date.now(), job.phase, job.sentTurnId ?? null);
+            .run(job.marker, id, Date.now(), job.sentTurnId && job.evidence.sameThreadReply ? 'completed' : job.phase, job.sentTurnId ?? null);
           this.db.exec('COMMIT');
         } catch (error) { this.db.exec('ROLLBACK'); throw error; }
       },

@@ -1,5 +1,6 @@
 // 桌面全流程 fixture：所有额度、轮次和发送都由本脚本提供，不使用真实账号。
 import net from 'node:net';
+import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -15,6 +16,7 @@ const reset = Math.floor(Date.now() / 1000) + 2;
 let used = 100;
 let sends = 0;
 let quotaCalls = 0;
+let receiptVisible = false;
 const historicalFailure = JSON.parse(readFileSync(new URL('../test/fixtures/usage-limit-20261029.json', import.meta.url), 'utf8')).turn;
 // 真实历史错误文案 + 模拟 systemError/额度/发送，不能记为真实跨窗口验证。
 const view = { thread: { id: target, status: { type: 'systemError' } }, turns: [historicalFailure] };
@@ -37,11 +39,12 @@ const server = net.createServer(socket => {
           value = { accountId: 'FIXTURE-NOT-A-REAL-ACCOUNT', ordinaryUsageAllowed: true, rateLimitsByLimitId: { codex: { primary: { usedPercent: used, resetsAt: reset, windowDurationMins: 300 }, secondary: { usedPercent: 10, resetsAt: reset + 604800, windowDurationMins: 10080 } } } };
         }
         else if (tool === 'list_threads') value = { pinnedThreads: [], threads: [{ id: target, title: '测试夹具：跨额度窗口长任务', kind: 'codex', hostId: 'local', status: view.thread.status.type, cwd: '本地模拟，不是真实会话' }] };
-        else if (tool === 'read_thread') { assert.equal(args.threadId, target); value = view; }
+        else if (tool === 'read_thread') { assert.equal(args.threadId, target); value = { ...view,
+          turns: receiptVisible ? view.turns : view.turns.filter(turn => !turn.id.startsWith('fixture-resumed-')) }; }
         else if (tool === 'send_message_to_thread') {
           assert.equal(args.threadId, target); assert.equal(used, 0); sends++;
-          view.thread.status.type = 'idle';
-          view.turns.unshift({ id: `fixture-resumed-${sends}`, status: 'completed', items: [{ type: 'functionCallOutput', namespace: 'codex_app', name: 'send_message_to_thread', output: { text: args.prompt } }, { type: 'agentMessage', text: '夹具任务完成' }] });
+          view.thread.status.type = 'active';
+          view.turns.unshift({ id: `fixture-resumed-${sends}`, status: 'inProgress', items: [{ type: 'functionCallOutput', namespace: 'codex_app', name: 'send_message_to_thread', output: { text: args.prompt } }, { type: 'agentMessage', text: '夹具任务执行中' }] });
           value = { success: true };
         } else throw new Error('fixture 收到未允许的调用');
         result = { success: true, contentItems: [{ type: 'inputText', text: JSON.stringify(value) }] };
@@ -53,7 +56,12 @@ const server = net.createServer(socket => {
 });
 await new Promise(resolveListen => server.listen(pipe, resolveListen));
 const dataDirectory = mkdtempSync(join(tmpdir(), 'codex-resume-FIXTURE-'));
-const env = { ...process.env, CODEX_RESUME_DATA_DIR: dataDirectory }; delete env.ELECTRON_RUN_AS_NODE;
+const goalHome = join(dataDirectory, 'codex-home'); mkdirSync(goalHome);
+writeFileSync(join(goalHome, 'session_index.jsonl'), JSON.stringify({ id: target }) + '\n');
+const goalDb = new DatabaseSync(join(goalHome, 'goals_1.sqlite'));
+goalDb.exec('CREATE TABLE thread_goals(thread_id TEXT PRIMARY KEY,goal_id TEXT,status TEXT)');
+goalDb.prepare('INSERT INTO thread_goals VALUES(?,?,?)').run(target, 'fixture-goal', 'active');
+const env = { ...process.env, CODEX_RESUME_DATA_DIR: dataDirectory, CODEX_HOME: goalHome }; delete env.ELECTRON_RUN_AS_NODE;
 let instance;
 const artifacts = resolve('var', 'desktop-smoke'); mkdirSync(artifacts, { recursive: true });
 try {
@@ -79,12 +87,24 @@ try {
   assert.equal(sends, 0);
   const waitingSnapshot = await window.evaluate(() => window.resume.snapshot());
   assert.equal(waitingSnapshot.events.find(event => event.type === 'worker_started').details.appVersion, version);
+  assert.equal(waitingSnapshot.events.find(event => event.type === 'worker_started').details.diagnosticsVersion, 3);
+  const initialQuota = waitingSnapshot.events.find(event => event.type === 'quota_checked');
+  assert.equal(initialQuota.details.nextCheckAt, waitingSnapshot.nextQuotaCheckAt);
+  assert.equal(initialQuota.details.nextQuotaCheckAt, waitingSnapshot.nextQuotaCheckAt);
+  for (let n = 0; n < 3; n++) await window.evaluate(() => window.resume.command({ type: 'refresh' }));
+  const aggregated = await window.evaluate(() => window.resume.snapshot());
+  assert.equal(aggregated.events.filter(e => e.type === 'quota_checked').length, 1);
+  assert.ok(aggregated.events.find(e => e.type === 'quota_checked').details.checkCount >= 4);
+  await window.getByRole('button', { name: '≡ 运行记录' }).click();
+  await expect(window.locator('.event-row').filter({ hasText: '已复查真实额度' })).toContainText('次相同检查');
   const stateEvent = waitingSnapshot.events.find(event => event.type === 'thread_state_observed');
   assert.equal(stateEvent.details.threadStatus, 'systemError');
   assert.equal(stateEvent.details.latestTurn.usageLimitDetected, true);
   assert.equal(stateEvent.details.latestTurn.error.message, historicalFailure.error.message);
   await window.screenshot({ path: join(artifacts, 'fixture-waiting.png'), animations: 'disabled' });
   await window.getByRole('button', { name: '⚙ 应用设置' }).click();
+  assert.deepEqual(await window.locator('main > .card').evaluateAll(cards => cards.map(card => card.querySelector('h2')?.textContent?.trim())),
+    ['额度恢复检查', '监控与桌面', '字号与页面外观', '本机数据']);
   const localData = window.locator('.data-card');
   const preview = localData.getByLabel('最近事件数据');
   await expect(preview).toContainText('测试夹具：跨额度窗口长任务');
@@ -99,6 +119,7 @@ try {
   assert.ok(previewEvents.filter(event => event.taskId).every(event => event.taskName === '测试夹具：跨额度窗口长任务'));
   const quotaEvent = previewEvents.find(event => event.type === 'quota_checked');
   assert.match(quotaEvent.details.nextCheckAt, datePattern);
+  for (const field of ['nextQuotaCheckAt', 'gateSuggestedCheckAt', 'firstCheckedAt', 'lastCheckedAt']) assert.match(quotaEvent.details[field], datePattern);
   assert.match(quotaEvent.details.windows[0].resetsAt, datePattern);
   const exportPath = join(dataDirectory, 'exported-events.jsonl');
   await instance.evaluate(({ dialog }, filePath) => {
@@ -123,14 +144,56 @@ try {
   await expect.poll(async () => {
     await window.evaluate(() => window.resume.command({ type: 'refresh' }));
     return (await window.evaluate(() => window.resume.snapshot())).tasks[0]?.phase;
-  }, { timeout: 20000, intervals: [1000, 2000] }).toBe('completed');
+  }, { timeout: 20000, intervals: [1000, 2000] }).toBe('verifying');
+  await expect(window.locator('.managed-card .phase')).toHaveText('等待投递回执');
+  await window.getByRole('button', { name: '详情', exact: true }).click();
+  await expect(window.locator('.el-drawer .phase')).toHaveText('等待投递回执');
+  await window.locator('.el-drawer__close-btn').click();
+  receiptVisible = true;
+  await window.evaluate(() => window.resume.command({ type: 'refresh' }));
+  await expect(window.locator('.managed-card .phase')).toHaveText('已续跑，等待完成');
+  const running = await window.evaluate(() => window.resume.snapshot());
+  assert.equal(running.tasks[0].sentTurnId, 'fixture-resumed-1');
+  assert.equal(running.tasks[0].evidence.sameThreadReply, false);
+  await window.getByRole('button', { name: '详情', exact: true }).click();
+  await expect(window.locator('.el-drawer .phase')).toHaveText('已续跑，等待完成');
+  await window.locator('.el-drawer__close-btn').click();
+  await window.getByRole('button', { name: '◫ 运行总览' }).click();
+  await expect(window.locator('.task-section .phase')).toHaveText('已续跑，等待完成');
+  await instance.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1000, 700));
+  assert.equal(await window.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false);
+  await window.screenshot({ path: join(artifacts, 'fixture-resumed-running.png'), animations: 'disabled' });
+  await instance.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1240, 850));
+  await window.evaluate(() => window.resume.command({ type: 'refresh' })); assert.equal(sends, 1);
+  view.turns[0].status = 'completed'; view.thread.status.type = 'idle';
+  await window.evaluate(() => window.resume.command({ type: 'refresh' }));
+  await window.getByRole('button', { name: '▤ 托管任务' }).click();
+  await expect(window.locator('.managed-card .phase')).toHaveText('观察中');
+  assert.equal((await window.evaluate(() => window.resume.snapshot())).tasks.length, 1, 'Goal 尚在进行，单轮结束不能移除');
+  goalDb.prepare('DELETE FROM thread_goals WHERE thread_id=?').run(target);
+  await window.evaluate(() => window.resume.command({ type: 'refresh' }));
+  await expect(window.locator('.managed-card .task-row')).toHaveCount(0);
   assert.equal(sends, 1);
   const snapshot = await window.evaluate(() => window.resume.snapshot());
-  assert.equal(snapshot.tasks[0].targetThreadId, target);
-  assert.equal(snapshot.tasks[0].enabled, false);
+  assert.equal(snapshot.tasks.length, 0);
+  const completion = snapshot.events.find(event => event.type === 'completed');
+  assert.equal(completion.details.targetThreadId, target);
+  assert.equal(completion.details.evidence.sameThreadReply, true);
   assert.ok(snapshot.events.some(event => event.type === 'resume_preflight_passed'));
   assert.ok(snapshot.events.some(event => event.type === 'resume_receipt_matched'));
   await window.screenshot({ path: join(artifacts, 'fixture-completed.png'), animations: 'disabled' });
+  await window.getByRole('button', { name: '托管会话', exact: true }).click();
+  await window.locator('.consent-box .el-checkbox').click();
+  await window.getByRole('button', { name: '确认并开始托管' }).click();
+  await expect(window.locator('.el-message--error')).toContainText('该任务已经完成，无法加入托管列表');
+  assert.equal((await window.evaluate(() => window.resume.snapshot())).tasks.length, 0);
+  goalDb.prepare('INSERT INTO thread_goals VALUES(?,?,?)').run(target, 'fixture-paused-goal', 'paused');
+  await window.getByRole('button', { name: '确认并开始托管' }).click();
+  await window.getByText('已开始托管；仅在真实额度错误后自动续跑', { exact: true }).waitFor();
+  await window.evaluate(() => window.resume.command({ type: 'refresh' }));
+  await expect(window.locator('.managed-card .phase')).toHaveText('需要处理');
+  await expect(window.locator('.managed-card')).toContainText('Goal 已主动暂停');
+  assert.equal(sends, 1);
   await window.getByRole('button', { name: '移除', exact: true }).click();
   await window.locator('.el-message-box').getByRole('button', { name: '移除', exact: true }).click();
   await expect.poll(async () => (await window.evaluate(() => window.resume.snapshot())).tasks.length).toBe(0);
@@ -139,11 +202,14 @@ try {
   const removedEvents = JSON.parse(await preview.textContent()).filter(event => event.taskId);
   assert.ok(removedEvents.every(event => event.taskName === '测试夹具：跨额度窗口长任务'));
   await window.getByRole('button', { name: '≡ 运行记录' }).click();
-  await expect(window.locator('.event-row').filter({ hasText: '已移除托管记录' })).toContainText('测试夹具：跨额度窗口长任务');
+  await expect(window.locator('.event-row').filter({ hasText: '已移除托管记录' })).toContainText([
+    '测试夹具：跨额度窗口长任务', '测试夹具：跨额度窗口长任务',
+  ]);
   const result = { time: new Date().toISOString(), source: 'fake_named_pipe_fixture', realQuotaRecoveryVerified: false,
-    sends, sameThread: true, checks: ['GUI-consent', 'systemError-message-only-curly-apostrophe', 'diagnostic-version-and-error-evidence', 'quota-blocked-zero-sends', 'local-data-live-preview', 'local-data-refresh-without-quota-or-send', 'local-data-readable-times', 'JSONL-matches-preview', 'local-data-narrow-layout', 'removed-task-name-retained', 'pause-blocks-dispatch', 'recovery-recheck', 'preflight-and-receipt-logs', 'same-thread-receipt', 'completed-stop'], evidence: snapshot.tasks[0].evidence };
+    sends, sameThread: true, checks: ['GUI-consent', 'systemError-message-only-curly-apostrophe', 'diagnostic-version-3-and-error-evidence', 'quota-blocked-zero-sends', 'quota-log-aggregation', 'quota-log-actual-schedule', 'local-data-live-preview', 'local-data-refresh-without-quota-or-send', 'local-data-readable-times', 'JSONL-matches-preview', 'local-data-narrow-layout', 'removed-task-name-retained', 'pause-blocks-dispatch', 'recovery-recheck', 'preflight-and-receipt-logs', 'waiting-receipt-label', 'matched-running-label-overview-list-detail', 'matched-running-narrow-layout', 'same-thread-receipt', 'settings-card-order', 'goal-round-complete-retained', 'completed-auto-removed', 'completed-add-rejected', 'paused-goal-retained-no-send'], evidence: completion.details.evidence };
   writeFileSync(join(artifacts, 'fixture-result.json'), JSON.stringify(result, null, 2)); console.log(JSON.stringify(result, null, 2));
 } finally {
+  goalDb.close();
   await instance?.close(); for (const socket of sockets) socket.destroy();
   await new Promise(resolveClose => server.close(resolveClose));
 }

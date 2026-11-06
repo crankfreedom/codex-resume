@@ -2,6 +2,10 @@ import { createHash } from 'node:crypto';
 
 export type Mode = 'live' | 'hybrid' | 'simulation';
 export type Phase = 'observing' | 'waiting_quota' | 'sending' | 'verifying' | 'completed' | 'suspended' | 'send_uncertain';
+export interface CurrentGoal {
+  id: string;
+  status: 'active' | 'paused' | 'blocked' | 'usage_limited' | 'budget_limited' | 'complete';
+}
 export interface Turn {
   id: string;
   status: string;
@@ -11,6 +15,8 @@ export interface Turn {
 export interface ThreadView {
   thread: { id: string; title?: string; status: { type: string; activeFlags?: string[] } };
   turns: Turn[];
+  // undefined：旧 CLI 未接入 Goal；null：桌面已只读确认没有当前 Goal。
+  goal?: CurrentGoal | null;
 }
 export interface QuotaWindow {
   usedPercent?: number | null;
@@ -48,6 +54,7 @@ export interface Job {
   prompt: string;
   verifyMarker: boolean;
   followSession?: boolean;
+  goalId?: string | null;
   resumeCount: number;
   maxResumes?: number;
   baselineTurnIds: string[];
@@ -60,6 +67,7 @@ export interface ThreadObservation {
   threadStatus: string;
   activeFlags: string[];
   latestTurn: { id: string; status: string; error: Record<string, string> | null; usageLimitDetected: boolean } | null;
+  goal?: CurrentGoal | null;
 }
 export interface DesktopPort {
   quota(): Promise<Quota>;
@@ -67,7 +75,9 @@ export interface DesktopPort {
   send(id: string, prompt: string): Promise<void>;
 }
 // 仅用于发送调用之前的本地取消；网络错误绝不能转换成这个类型。
-export class DispatchCancelledBeforeSend extends Error {}
+export class DispatchCancelledBeforeSend extends Error {
+  reason?: string;
+}
 export interface Clock { now(): number; sleep(ms: number): Promise<void> }
 export interface Journal {
   save(job: Job): void;
@@ -75,6 +85,12 @@ export interface Journal {
 }
 export const realClock: Clock = { now: () => Date.now(), sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)) };
 export const terminal = (phase: Phase) => ['completed', 'suspended', 'send_uncertain'].includes(phase);
+
+export function currentTaskCompleted(view: ThreadView): boolean {
+  return view.goal !== undefined && (!view.goal || view.goal.status === 'complete')
+    && ['idle', 'notLoaded'].includes(view.thread.status.type) && !view.thread.status.activeFlags?.length
+    && view.turns[0]?.status === 'completed';
+}
 
 export function fingerprint(quota: Quota): string {
   if (typeof quota.accountId !== 'string' || !quota.accountId) throw new Error('账号身份不可用，拒绝授权续跑');
@@ -156,6 +172,7 @@ export function describeThread(view: ThreadView): ThreadObservation {
     threadId: view.thread.id, threadStatus: view.thread.status.type,
     activeFlags: [...(view.thread.status.activeFlags ?? [])].sort(),
     latestTurn: turn ? { id: turn.id, status: turn.status, error, usageLimitDetected: stoppedForQuota(view) } : null,
+    ...(view.goal !== undefined ? { goal: view.goal } : {}),
   };
 }
 

@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { DesktopClient } from '../desktop.ts';
 import { createJob, ResumeEngine } from '../engine.ts';
-import { DispatchCancelledBeforeSend, quotaGate, realClock, terminal } from '../domain.ts';
+import { DispatchCancelledBeforeSend, quotaGate, realClock, terminal, currentTaskCompleted } from '../domain.ts';
 import type { DesktopPort, Job, Quota } from '../domain.ts';
 import { FileJournal } from '../store.ts';
 import { AppDatabase } from './database.ts';
@@ -9,6 +9,8 @@ import { discoverCaller, threadIdPattern } from './bootstrap.ts';
 import type { Command, Snapshot, ThreadSummary } from './contracts.ts';
 import { validateAppearance } from './appearance.ts';
 import { quotaCheckAt, validateQuotaCheck } from './quota-schedule.ts';
+import { readLocalGoal } from './goals.ts';
+import type { GoalReader } from './goals.ts';
 
 type Connection = DesktopPort & {
   call<T>(name: string, args: Record<string, unknown>): Promise<T>;
@@ -32,9 +34,11 @@ export class MonitorService {
   private creating = new Set<string>();
   private failedLogged = false;
   private makeClient: (caller: string, pipe?: string) => Connection;
-  constructor(directory: string, makeClient = (caller: string, pipe?: string): Connection => new DesktopClient(caller, pipe), now = () => Date.now()) {
+  private readGoal: GoalReader;
+  constructor(directory: string, makeClient = (caller: string, pipe?: string): Connection => new DesktopClient(caller, pipe), now = () => Date.now(), readGoal: GoalReader = readLocalGoal) {
     this.makeClient = makeClient;
     this.now = now;
+    this.readGoal = readGoal;
     this.directory = directory;
     this.db = new AppDatabase(join(directory, 'resume.sqlite'));
     // 未落定的发送不能因进程重启重放。
@@ -57,6 +61,21 @@ export class MonitorService {
     return { connection: this.connection, quota: this.quota, nextQuotaCheckAt: this.nextQuotaCheckAt || null, threads: this.threads,
       tasks: this.db.tasks(), events: this.db.events(), settings: this.db.settings(), dataDirectory: this.directory,
       runtime: { state: 'running', heartbeatAt: Date.now(), pid: process.pid } };
+  }
+  private async readTask(id: string) {
+    const before = this.readGoal(id);
+    const view = await this.getClient().readThread(id);
+    const goal = this.readGoal(id);
+    if (view.thread.id !== id) throw new Error('目标会话身份不匹配');
+    if ((before?.id ?? null) !== (goal?.id ?? null)) throw new Error('读取期间 Goal 已变化，请刷新后重试');
+    return { ...view, goal };
+  }
+  private finish(job: Job) {
+    if (job.phase === 'completed') { this.db.removeCompleted(job.id); this.release(job.id); }
+    else if (terminal(job.phase)) {
+      if (this.db.enabled(job.id)) this.db.toggle(job.id, false);
+      this.release(job.id);
+    }
   }
   private async refreshQuota() {
     try {
@@ -104,13 +123,24 @@ export class MonitorService {
       if (refreshThreads || this.connection.state !== 'connected') await this.refreshThreads();
       if (this.connection.state !== 'connected') return;
       for (const { job, enabled } of this.db.jobs()) {
-        if (!enabled || this.stopping) continue;
-        if (terminal(job.phase)) { this.db.toggle(job.id, false); this.release(job.id); continue; }
+        if (this.stopping) break;
+        if (!enabled && job.phase !== 'completed') continue;
         try {
+          // 旧版 completed 只说明投递轮次结束，清理前重新检查当前任务。
+          if (job.phase === 'completed') {
+            const view = await this.readTask(job.targetThreadId);
+            if (currentTaskCompleted(view)) this.finish(job);
+            else {
+              job.phase = 'observing'; job.reason = 'task_not_completed'; job.goalId = view.goal?.id ?? null;
+              this.db.journal(job.id).save(job); this.db.toggle(job.id, false); this.release(job.id);
+            }
+            continue;
+          }
+          if (terminal(job.phase)) { this.finish(job); continue; }
           this.lease(job);
           await this.engine(job).step({ forceQuotaCheck: this.quotaInTick !== undefined, nextQuotaCheckAt: this.nextQuotaCheckAt });
           this.db.error(job.id, null);
-          if (terminal(job.phase)) { this.db.toggle(job.id, false); this.release(job.id); }
+          this.finish(job);
         } catch (error) {
           const message = (error as Error).message;
           if (this.db.tasks().find(t => t.id === job.id)?.lastError !== message) this.db.event(job.id, 'read_retry', { message });
@@ -145,10 +175,20 @@ export class MonitorService {
       quota: async () => {
         if (!this.quotaInTick) await this.refreshQuota();
         return this.quotaInTick!;
-      }, readThread: id => client.readThread(id),
+      }, readThread: id => this.readTask(id),
       send: async (id, prompt) => {
         const check = () => {
           if (this.stopping || !this.db.enabled(job.id)) throw new DispatchCancelledBeforeSend('托管已暂停');
+          let reason: string | undefined;
+          try {
+            const goal = this.readGoal(id);
+            if ((goal?.id ?? null) !== job.goalId) reason = 'goal_changed_or_cleared';
+            else if (goal && ['paused', 'blocked', 'budget_limited', 'complete'].includes(goal.status)) reason = 'goal_' + goal.status;
+          } catch { reason = 'goal_state_unavailable'; }
+          if (reason) {
+            const error = new DispatchCancelledBeforeSend('当前 Goal 状态不再允许投递');
+            error.reason = reason; throw error;
+          }
         };
         check(); await client.send(id, prompt, check);
       },
@@ -204,7 +244,14 @@ export class MonitorService {
       try {
         const client = this.getClient();
         const caller = this.db.settings().callerThreadId || discoverCaller();
-        const job = await createJob(client, { callerThreadId: caller, targetThreadId: target.id, mode: 'live', now: this.now(), prompt: command.prompt.trim() });
+        let goalId: string | null = null;
+        const job = await createJob({ quota: () => client.quota(), send: (id, text) => client.send(id, text), readThread: async id => {
+          const view = await this.readTask(id);
+          if (currentTaskCompleted(view)) throw new Error('该任务已经完成，无法加入托管列表');
+          goalId = view.goal?.id ?? null;
+          return view;
+        } }, { callerThreadId: caller, targetThreadId: target.id, mode: 'live', now: this.now(), prompt: command.prompt.trim() });
+        job.goalId = goalId;
         job.followSession = true; job.maxResumes = command.maxResumes;
         this.lease(job);
         try { this.db.add(job, target.title); } catch (error) { this.release(job.id); throw error; }
@@ -229,7 +276,7 @@ export class MonitorService {
       if (this.busy) throw new Error('正在检查任务，请稍后核对');
       if (!['sending', 'send_uncertain'].includes(entry.job.phase)) throw new Error('当前任务无需核对发送');
       this.busy = true;
-      try { await this.engine(entry.job).reconcile(); } finally { this.busy = false; }
+      try { await this.engine(entry.job).reconcile(); this.finish(entry.job); } finally { this.busy = false; }
     } else throw new Error('不支持的操作');
   }
   requestStop() { this.stopping = true; }

@@ -25,7 +25,7 @@ export const useMonitor = defineStore('monitor', () => {
       const plain = JSON.parse(JSON.stringify(value)) as Command;
       snapshot.value = await window.resume.command(plain); return true;
     }
-    catch (e) { error.value = (e as Error).message; return false; }
+    catch (e) { error.value = (e as Error).message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''); return false; }
     finally { busy.value = false; }
   }
   function stop() { unsubscribe?.(); }

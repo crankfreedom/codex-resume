@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
-  deliveryHasMarker, describeThread, fingerprint, quotaGate, stoppedForQuota, terminal, DispatchCancelledBeforeSend,
+  deliveryHasMarker, describeThread, fingerprint, quotaGate, stoppedForQuota, terminal, DispatchCancelledBeforeSend, currentTaskCompleted,
 } from './domain.ts';
 import type { Clock, DesktopPort, Job, Journal, Mode, Quota, ThreadView } from './domain.ts';
 
@@ -46,8 +46,30 @@ export class ResumeEngine {
     this.job.phase = 'suspended'; this.job.reason = reason;
     this.persist(); this.journal.event('suspended', { reason, observation: this.job.lastObservation });
   }
+  private acceptGoal(view: ThreadView): boolean {
+    if (view.goal === undefined) return true;
+    const id = view.goal?.id ?? null;
+    if (this.job.goalId === undefined) { this.job.goalId = id; this.persist(); }
+    else if (this.job.goalId !== id && !currentTaskCompleted(view)) {
+      this.stop('goal_changed_or_cleared'); return false;
+    }
+    if (view.goal && ['paused', 'blocked', 'budget_limited'].includes(view.goal.status)) {
+      this.stop('goal_' + view.goal.status); return false;
+    }
+    return true;
+  }
+  private nextCycle(goalContinues = false) {
+    const job = this.job;
+    const marker = `CODEX_RESUME_ACK_${randomUUID().replaceAll('-', '')}`;
+    job.prompt = job.prompt.replaceAll(job.marker, marker); job.marker = marker;
+    job.phase = 'observing'; job.reason = goalContinues ? 'goal_continues' : undefined;
+    job.sentTurnId = undefined; job.sentAt = undefined; job.baselineTurnIds = [];
+    job.nextCheckAt = this.clock.now(); this.persist();
+    this.journal.event(goalContinues ? 'goal_observing' : 'next_quota_cycle', { resumeCount: job.resumeCount });
+  }
   private sameStoppedTurn(view: ThreadView): boolean {
     if (view.thread.id !== this.job.targetThreadId) { this.stop('thread_identity_changed'); return false; }
+    if (!this.acceptGoal(view)) return false;
     if (view.thread.status.type === 'active' || view.thread.status.activeFlags?.length) {
       this.stop('manual_activity_or_approval'); return false;
     }
@@ -68,13 +90,22 @@ export class ResumeEngine {
     const view = await this.port.readThread(job.targetThreadId);
     this.observe(view, 'observe');
     if (view.thread.id !== job.targetThreadId) { this.stop('thread_identity_changed'); return; }
+    if (currentTaskCompleted(view)) {
+      job.phase = 'completed'; job.reason = undefined; this.persist();
+      this.journal.event('completed', { mode: job.mode, targetThreadId: job.targetThreadId,
+        turnId: view.turns[0]!.id, resumeCount: job.resumeCount, evidence: job.evidence,
+        verdict: 'current_task_completed', completionRule: 'no_unfinished_goal_and_latest_turn_completed' });
+      return;
+    }
+    if (!this.acceptGoal(view)) return;
     if (job.phase === 'observing') {
       if (view.thread.status.type === 'active') return;
       if (view.thread.status.activeFlags?.length) { this.stop('approval_or_input_pending'); return; }
       if (!stoppedForQuota(view)) {
         if (view.turns[0]?.status === 'completed' && job.followSession) {
-          if (job.reason !== 'awaiting_actual_quota_event') {
-            job.reason = 'awaiting_actual_quota_event'; this.persist();
+          const reason = view.goal ? 'goal_continues' : 'awaiting_actual_quota_event';
+          if (job.reason !== reason) {
+            job.reason = reason; this.persist();
             this.journal.event('observing_completed_session', { reason: job.reason, noMessageSent: true });
           }
           return;
@@ -112,14 +143,16 @@ export class ResumeEngine {
     this.journal.event('resume_preflight_passed', { blockedTurnId: job.blockedTurnId, accountMatches: true,
       quotaAvailable: true, observation: job.lastObservation });
     if (job.mode === 'live' && job.evidence.serverQuotaBlockedObserved) job.evidence.serverRecoveryObserved = true;
+    if (job.resumeCount >= (job.maxResumes ?? 1)) { this.stop('resume_limit_reached'); return; }
     job.baselineTurnIds = finalView.turns.map((turn) => turn.id);
+    job.evidence.sameThreadReply = false;
     job.phase = 'sending'; job.resumeCount += 1; job.sentAt = this.clock.now();
     this.persist();
     this.journal.event('send_intent_persisted', { targetThreadId: job.targetThreadId, marker: job.marker, resumeCount: job.resumeCount });
     try { await this.port.send(job.targetThreadId, job.prompt); }
     catch (error) {
       if (error instanceof DispatchCancelledBeforeSend) {
-        job.resumeCount -= 1; this.stop('monitoring_paused_before_send'); return;
+        job.resumeCount -= 1; this.stop(error.reason ?? 'monitoring_paused_before_send'); return;
       }
       job.phase = 'send_uncertain'; job.reason = 'send_response_uncertain'; this.persist();
       this.journal.event('send_uncertain', { reason: job.reason, message: (error as Error).message }); return;
@@ -132,6 +165,7 @@ export class ResumeEngine {
     const view = await this.port.readThread(job.targetThreadId);
     this.observe(view, 'verify');
     if (view.thread.id !== job.targetThreadId) { this.stop('thread_identity_changed'); return; }
+    if (!this.acceptGoal(view)) return;
     // 同时校验输入投递标记，防止把人工启动的另一轮误当作自动续跑成功。
     const own = view.turns.find((turn) => !job.baselineTurnIds.includes(turn.id) && deliveryHasMarker(turn, job.marker));
     if (!own) {
@@ -150,11 +184,7 @@ export class ResumeEngine {
       if (job.followSession && own.id === view.turns[0]?.id
         && stoppedForQuota({ thread: view.thread, turns: [own] })
         && job.resumeCount < (job.maxResumes ?? 1)) {
-        const nextMarker = `CODEX_RESUME_ACK_${randomUUID().replaceAll('-', '')}`;
-        job.prompt = job.prompt.replaceAll(job.marker, nextMarker); job.marker = nextMarker;
-        job.phase = 'observing'; job.reason = undefined; job.sentTurnId = undefined; job.sentAt = undefined;
-        job.baselineTurnIds = []; job.nextCheckAt = this.clock.now();
-        this.persist(); this.journal.event('next_quota_cycle', { resumeCount: job.resumeCount }); return;
+        this.nextCycle(); return;
       }
       this.stop('resumed_turn_failed_or_interrupted'); return;
     }
@@ -165,7 +195,15 @@ export class ResumeEngine {
         && !(item.type === 'functionCallOutput' && item.name === 'send_message_to_thread' && item.namespace === 'codex_app'));
       if (!reply || actions.length) { this.stop('validation_reply_or_actions_mismatch'); return; }
     }
-    job.evidence.sameThreadReply = true; job.phase = 'completed'; this.persist();
+    job.evidence.sameThreadReply = true;
+    this.persist();
+    if (view.goal !== undefined && !currentTaskCompleted(view)) {
+      if (view.thread.status.activeFlags?.length) { this.stop('approval_or_input_pending'); return; }
+      if (view.goal && view.goal.status !== 'complete') { this.nextCycle(true); return; }
+      if (view.turns[0]?.id !== own.id) { this.stop('thread_changed_since_resume'); return; }
+      this.persist(); return;
+    }
+    job.phase = 'completed'; job.reason = undefined; this.persist();
     this.journal.event('completed', {
       mode: job.mode, targetThreadId: job.targetThreadId, turnId: own.id, resumeCount: job.resumeCount,
       evidence: job.evidence, verdict: job.mode === 'live'
