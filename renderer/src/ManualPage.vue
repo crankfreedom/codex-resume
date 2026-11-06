@@ -37,7 +37,7 @@ watch(() => chapter.value?.id, async () => {
         <h2>Codex Resume 使用说明书</h2>
         <p>从第一次托管，到额度恢复后的原会话续跑。共 {{ manualChapters.length }} 章，按当前实现逐项说明。</p>
       </div>
-      <div class="manual-edition">v{{ version }}<span>核对日期 2026-10-28</span></div>
+      <div class="manual-edition">v{{ version }}<span>核对日期 2026-11-06</span></div>
     </div>
 
     <div class="manual-live" aria-label="当前更新设置">

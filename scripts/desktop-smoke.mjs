@@ -54,7 +54,7 @@ try {
   await window.getByText(snapshot.connection.state === 'connected' ? 'Codex 已连接' : 'Codex 未连接', { exact: true }).waitFor();
   assert.equal(snapshot.tasks.length, 0);
   assert.equal(snapshot.events.find(event => event.type === 'worker_started').details.appVersion, version);
-  assert.equal(snapshot.events.find(event => event.type === 'worker_started').details.diagnosticsVersion, 2);
+  assert.equal(snapshot.events.find(event => event.type === 'worker_started').details.diagnosticsVersion, 3);
   assert.ok(!JSON.stringify(snapshot).includes('accountId'));
   await window.screenshot({ path: join(artifacts, 'overview.png'), animations: 'disabled' });
   await window.getByRole('button', { name: '? 使用说明', exact: true }).click();
@@ -80,12 +80,20 @@ try {
   await expect(manualQuery).toBeFocused();
   await window.keyboard.press('Escape');
   await expect(directoryPanel).toBeHidden();
+  await window.locator('.manual-reader').focus();
+  await window.mouse.move(1, 1);
   await directoryTab.hover();
   await expect(directoryPanel).toBeVisible();
   await expect(directoryTab).toHaveAttribute('aria-expanded', 'true');
   assert.equal(await window.getByRole('navigation', { name: '说明书目录' }).getByRole('button').count(), 13);
   assert.deepEqual(await window.locator('.manual-article').boundingBox(), articleBounds, '浮层展开不能挤占或移动正文');
-  await manualQuery.hover();
+  // 保留上面的悬浮展开断言；搜索用键盘进入，避免跨越动画浮层引发 mouseleave。
+  await window.mouse.move(1, 1);
+  await expect(directoryPanel).toBeHidden();
+  await directoryTab.focus();
+  await expect(directoryPanel).toBeVisible();
+  await window.keyboard.press('Tab');
+  await expect(manualQuery).toBeFocused();
   await expect(directoryPanel).toBeVisible();
   assert.equal(await directoryPanel.evaluate(element => {
     const rect = element.getBoundingClientRect();
@@ -97,19 +105,27 @@ try {
   await window.getByRole('heading', { name: '数据何时更新', exact: true }).waitFor();
   await window.getByText('刷新也可能推进自动续跑', { exact: true }).scrollIntoViewIfNeeded();
   await window.mouse.move(articleBounds.x + articleBounds.width - 20, articleBounds.y + 20);
+  await window.keyboard.press('Escape');
   await expect(directoryPanel).toBeHidden();
   await window.screenshot({ path: join(artifacts, 'manual-timing.png'), animations: 'disabled' });
-  await directoryTab.hover();
+  // 正文滚动后布局会变化；用键盘聚焦展开，避免鼠标移出浮层导致搜索框收起。
+  await window.mouse.move(1, 1);
+  await directoryTab.focus();
+  await expect(directoryPanel).toBeVisible();
+  await window.keyboard.press('Tab');
+  await expect(manualQuery).toBeFocused();
   await manualQuery.fill('隐私');
   await window.getByRole('heading', { name: '本地数据与隐私范围', exact: true }).waitFor();
   await manualQuery.fill('不存在的说明关键词xyz');
   await window.getByRole('heading', { name: '没有找到匹配章节', exact: true }).waitFor();
   await window.getByRole('button', { name: '清空搜索', exact: true }).click();
   await expect(directoryPanel).toBeHidden();
-  await directoryTab.hover();
+  await window.mouse.move(1, 1);
+  await directoryTab.focus();
   await expect(directoryPanel).toBeVisible();
   await expect(window.getByRole('navigation', { name: '说明书目录' }).getByRole('button')).toHaveCount(13);
   await window.mouse.move(articleBounds.x + articleBounds.width - 20, articleBounds.y + 20);
+  await window.keyboard.press('Escape');
   await expect(directoryPanel).toBeHidden();
   await window.getByRole('button', { name: '下一章 →', exact: true }).click();
   await window.getByRole('heading', { name: '自动续跑的完整条件', exact: true }).waitFor();
@@ -120,7 +136,11 @@ try {
   // 缩窗可能保留滚动偏移；测量前回到页首，避免 hover 自动滚动被误判为正文重排。
   await window.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }));
   const narrowBounds = await window.locator('.manual-article').boundingBox();
-  await directoryTab.hover();
+  // 原生窗口缩放后鼠标坐标更新可能迟于 hover；改用已覆盖的键盘展开入口。
+  await window.mouse.move(1, 1);
+  await expect(directoryPanel).toBeHidden();
+  await directoryTab.focus();
+  await expect(directoryTab).toBeFocused();
   await expect(directoryPanel).toBeVisible();
   assert.deepEqual(await window.locator('.manual-article').boundingBox(), narrowBounds);
   assert.equal(await directoryPanel.evaluate(element => element.getBoundingClientRect().right <= window.innerWidth), true);
@@ -131,6 +151,7 @@ try {
   assert.ok(directoryScroll > 0, '窄窗口的浮层目录仍可独立滚动');
   await window.screenshot({ path: join(artifacts, 'manual-narrow-directory-open.png'), animations: 'disabled' });
   await window.mouse.move(narrowBounds.x + narrowBounds.width - 20, narrowBounds.y + 20);
+  await window.keyboard.press('Escape');
   await expect(directoryPanel).toBeHidden();
   await instance.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1240, 850));
   await window.getByRole('button', { name: '▤ 托管任务' }).click();
@@ -146,18 +167,35 @@ try {
   }
   await window.getByRole('button', { name: '⚙ 应用设置' }).click();
   await window.getByRole('heading', { name: '字号与页面外观', exact: true }).waitFor();
+  await expect(window.getByRole('radio', { name: '青绿（默认）', exact: true })).toBeChecked();
+  const themeRadios = window.locator('.theme-picker input[type=radio]');
+  await expect(themeRadios).toHaveCount(20);
+  // 穷举真实控件与计算样式；不保存时离页应回到当前默认主题。
+  for (const radio of await themeRadios.all()) {
+    await radio.check();
+    const id = await radio.inputValue();
+    await expect(window.locator('html')).toHaveAttribute('data-theme', id);
+    const gradient = await radio.evaluate(element => element.closest('label').querySelector('.theme-swatch').style.background.includes('gradient'));
+    assert.equal(await window.locator('.preview-actions .el-button--primary').evaluate(element => getComputedStyle(element).backgroundImage.includes('gradient')), gradient);
+    assert.equal(await window.locator('nav button.selected').evaluate(element => getComputedStyle(element).backgroundImage.includes('gradient')), gradient);
+  }
+  await window.getByRole('button', { name: '恢复默认', exact: true }).click();
+  await expect(window.locator('html')).toHaveAttribute('data-theme', 'teal');
+  await window.getByRole('radio', { name: '鸢尾', exact: true }).check();
   await window.getByRole('button', { name: '大字阅读', exact: true }).click();
+  await expect(window.getByRole('radio', { name: '鸢尾', exact: true })).toBeChecked();
   await expect.poll(() => window.locator('h1').evaluate(element => getComputedStyle(element).fontSize)).toBe('32px');
   await window.getByRole('button', { name: '◫ 运行总览', exact: true }).click();
   await expect.poll(() => window.locator('h1').evaluate(element => getComputedStyle(element).fontSize)).toBe('28px');
+  await expect(window.locator('html')).toHaveAttribute('data-theme', 'teal');
   await window.getByRole('button', { name: '⚙ 应用设置' }).click();
   const values = { pageTitleSize: '34', sectionTitleSize: '22', bodyFontSize: '20', secondaryFontSize: '15', navFontSize: '18', lineHeight: '1.9' };
   for (const [key, value] of Object.entries(values)) {
     await window.locator(`#appearance-${key}`).fill(value);
     await window.locator(`#appearance-${key}`).press('Tab');
   }
-  await window.locator('.appearance-option').filter({ has: window.locator('#appearance-accent') }).locator('.el-select__wrapper').click();
-  await window.getByRole('option', { name: '蓝色', exact: true }).click();
+  await window.getByRole('radio', { name: '蓝色', exact: true }).check();
+  await window.getByRole('radio', { name: '鸢尾', exact: true }).check();
   await window.locator('.appearance-option').filter({ has: window.locator('#appearance-density') }).locator('.el-select__wrapper').click();
   await window.getByRole('option', { name: '紧凑', exact: true }).click();
   await window.getByRole('button', { name: '保存外观', exact: true }).click();
@@ -166,9 +204,10 @@ try {
   await window.screenshot({ path: join(artifacts, 'appearance.png'), animations: 'disabled', fullPage: true });
   snapshot = await window.evaluate(() => window.resume.snapshot());
   assert.equal(snapshot.settings.appearance.bodyFontSize, 20);
-  assert.equal(snapshot.settings.appearance.accent, 'blue');
+  assert.equal(snapshot.settings.appearance.accent, 'iris');
   await window.getByRole('button', { name: '◫ 运行总览', exact: true }).click();
   await expect.poll(() => window.locator('h1').evaluate(element => getComputedStyle(element).fontSize)).toBe('34px');
+  await expect(window.locator('html')).toHaveAttribute('data-theme', 'iris');
   assert.equal(await window.getByRole('button', { name: '↻ 刷新', exact: true }).evaluate(element => getComputedStyle(element).fontSize), '20px');
   await window.screenshot({ path: join(artifacts, 'appearance-overview.png'), animations: 'disabled' });
   await window.getByRole('button', { name: '? 使用说明', exact: true }).click();
@@ -178,6 +217,10 @@ try {
   await window.screenshot({ path: join(artifacts, 'appearance-manual-narrow.png'), animations: 'disabled' });
   await instance.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1240, 850));
   await window.getByRole('button', { name: '⚙ 应用设置' }).click();
+  await instance.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1000, 700));
+  assert.equal(await window.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false);
+  await window.locator('.theme-picker').screenshot({ path: join(artifacts, 'themes-narrow.png') });
+  await instance.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1240, 850));
   await window.getByRole('heading', { name: '监控与桌面' }).waitFor();
   const quotaSettings = window.locator('.quota-check-settings');
   await expect(quotaSettings.getByRole('radio')).toHaveCount(0);
@@ -219,6 +262,8 @@ try {
   assert.equal(snapshot.settings.notifications, false);
   assert.equal(snapshot.settings.appearance.bodyFontSize, 20);
   assert.equal(snapshot.settings.appearance.density, 'compact');
+  assert.equal(snapshot.settings.appearance.accent, 'iris');
+  await expect(window.getByRole('radio', { name: '鸢尾', exact: true })).toBeChecked();
   assert.deepEqual(snapshot.settings.quotaCheck, { intervalSeconds: 30 });
   await expect(window.locator('#quota-check-interval')).toHaveValue('30');
   await expect.poll(() => window.locator('h1').evaluate(element => getComputedStyle(element).fontSize)).toBe('34px');
