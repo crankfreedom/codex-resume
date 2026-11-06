@@ -46,6 +46,65 @@ async function add(service: MonitorService, desktop: FakeDesktop) {
   return service.db.jobs()[0]!.job;
 }
 
+test('10 秒额度查询照常执行，重复额度分段合并，变化和恢复立即记录且只发送一次', async () => {
+  const start = 1800000000000; let now = start;
+  const { service, desktop, cleanup } = await setup(() => now);
+  try {
+    await service.command({ type: 'settings', value: { ...service.db.settings(), quotaCheck: { intervalSeconds: 10 } } });
+    await add(service, desktop); await service.tick(true);
+    const calls = desktop.quotaCalls;
+    const checks = () => service.db.events().filter(e => e.type === 'quota_checked');
+    const firstId = checks()[0]!.id;
+    for (let n = 1; n <= 89; n++) { now = start + n * 10000; await service.tick(); }
+    assert.equal(desktop.quotaCalls, calls + 89);
+    assert.equal(desktop.sends, 0);
+    assert.equal(checks().length, 2);
+    assert.equal(checks()[1]!.id, firstId);
+    assert.equal(checks()[1]!.details.checkCount, 60);
+    assert.equal(checks()[0]!.details.checkCount, 30);
+    assert.equal(checks()[0]!.details.periodicSummary, true);
+    assert.equal(checks()[0]!.details.firstCheckedAt, start + 600000);
+    assert.equal(checks()[0]!.details.lastCheckedAt, now);
+    assert.equal(checks()[0]!.details.nextCheckAt, service.snapshot().nextQuotaCheckAt);
+    assert.equal(checks()[0]!.details.nextCheckAt, service.db.tasks()[0]!.nextCheckAt);
+    assert.equal(checks()[0]!.details.nextCheckAt, now + 10000);
+    assert.notEqual(checks()[0]!.details.gateSuggestedCheckAt, now + 10000);
+    desktop.quotaValue.rateLimitsByLimitId!.codex!.secondary!.usedPercent = 40;
+    now += 10000; await service.tick(); assert.equal(checks().length, 3);
+    desktop.quotaValue = exampleQuota(0, now + 3600000);
+    now += 10000; await service.tick();
+    assert.equal(checks().length, 4); assert.equal(checks()[0]!.details.available, true);
+    assert.equal(desktop.sends, 1);
+    now += 10000; await service.tick();
+    assert.equal(service.db.tasks()[0]!.phase, 'completed');
+    assert.equal(service.db.tasks()[0]!.enabled, false);
+    assert.equal(desktop.sends, 1);
+  } finally { await cleanup(); }
+});
+
+test('快照分别暴露未匹配和已匹配的续跑轮次，长任务继续运行不被当作完成', async () => {
+  const { service, desktop, cleanup } = await setup();
+  try {
+    await add(service, desktop); await service.tick(true);
+    desktop.quotaValue = exampleQuota(0, Date.now() + 3600000);
+    await service.tick(true);
+    assert.equal(service.snapshot().tasks[0]!.phase, 'verifying');
+    assert.equal(service.snapshot().tasks[0]!.sentTurnId, undefined);
+    desktop.view.turns[0]!.status = 'inProgress'; desktop.view.thread.status.type = 'active';
+    await service.tick(true);
+    const task = service.snapshot().tasks[0]!;
+    assert.equal(task.phase, 'verifying'); assert.equal(task.sentTurnId, 'sent-1');
+    assert.equal(task.evidence.sameThreadReply, false); assert.equal(task.enabled, true);
+    await service.tick(true); assert.equal(desktop.sends, 1);
+    desktop.view.turns[0]!.status = 'completed'; desktop.view.thread.status.type = 'idle';
+    await service.tick(true);
+    assert.equal(service.snapshot().tasks[0]!.phase, 'completed');
+    assert.equal(service.snapshot().tasks[0]!.evidence.sameThreadReply, true);
+    assert.equal(desktop.sends, 1);
+  } finally { await cleanup(); }
+});
+
+
 test('本机数据刷新读取新事件，不查询额度、不推进任务或投递', async () => {
   const { service, desktop, cleanup } = await setup();
   try {

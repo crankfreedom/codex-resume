@@ -9,7 +9,7 @@ export interface Settings { pollSeconds: number; quotaCheck: QuotaCheckSettings;
 export interface ManagedTask {
   id: string; title: string; targetThreadId: string; enabled: boolean; phase: Phase;
   reason?: string; createdAt: number; updatedAt: number; nextCheckAt: number;
-  resumeCount: number; maxResumes: number; prompt: string; lastError?: string;
+  resumeCount: number; maxResumes: number; prompt: string; lastError?: string; sentTurnId?: string;
   evidence: { serverLimitObserved: boolean; serverQuotaBlockedObserved?: boolean; serverRecoveryObserved: boolean; sameThreadReply: boolean };
 }
 export interface EventRow { id: number; time: number; taskId: string | null; taskName: string | null; type: string; details: Record<string, unknown> }

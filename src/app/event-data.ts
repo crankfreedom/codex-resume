@@ -1,6 +1,7 @@
 import type { EventRow } from './contracts.ts';
 
-const millisecondFields = new Set(['time', 'createdAt', 'updatedAt', 'checkedAt', 'nextCheckAt', 'nextQuotaCheckAt', 'heartbeatAt']);
+const millisecondFields = new Set(['time', 'createdAt', 'updatedAt', 'checkedAt', 'nextCheckAt', 'nextQuotaCheckAt', 'heartbeatAt',
+  'gateSuggestedCheckAt', 'firstCheckedAt', 'lastCheckedAt']);
 
 /** 按本机时区输出固定精度，数据库和调度仍使用原始时间戳。 */
 export function formatDataTime(value: number): string {

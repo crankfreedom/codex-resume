@@ -65,3 +65,35 @@ test('旧版 SQLite 补齐历史任务名，未知任务不臆造名称，重复
     database?.close(); rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('额度聚合跨重启保留计数，不跨任务、未知状态、观察依据或时钟回拨合并，不回写旧日志', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'codex-resume-quota-events-'));
+  const path = join(directory, 'resume.sqlite'); let db = new AppDatabase(path);
+  const start = 1800000000000;
+  const base = { available: false, reason: 'quota_blocked', windows: [{ usedPercent: 100, resetsAt: start / 1000 }],
+    nextCheckAt: start + 10000, nextQuotaCheckAt: start + 10000, gateSuggestedCheckAt: start + 60000,
+    checkedAt: start, observation: { latestTurn: { id: 'blocked-1' } } };
+  const checks = () => db.events().filter(e => e.taskId === 'task-1');
+  try {
+    db.event('task-1', 'quota_checked', { reason: 'legacy' });
+    const legacy = checks()[0]!;
+    db.event('task-1', 'quota_checked', base);
+    db.close(); db = new AppDatabase(path);
+    db.event('task-1', 'quota_checked', { ...base, checkedAt: start + 10000, nextCheckAt: start + 20000 });
+    assert.equal(checks().length, 2); assert.equal(checks()[0]!.details.checkCount, 2);
+    assert.deepEqual(checks().at(-1), legacy);
+    db.event('task-2', 'quota_checked', { ...base, checkedAt: start + 20000 });
+    assert.equal(db.events().find(e => e.taskId === 'task-2')!.details.checkCount, 1);
+    db.event('task-1', 'quota_checked', { ...base, checkedAt: start + 20000, reason: 'quota_unknown' });
+    assert.equal(checks().length, 3);
+    db.event('task-1', 'quota_checked', { ...base, checkedAt: start + 30000, reason: 'quota_unknown', observation: { latestTurn: { id: 'blocked-2' } } });
+    assert.equal(checks().length, 4);
+    db.event('task-1', 'quota_checked', { ...base, checkedAt: start - 10000 });
+    db.event('task-1', 'quota_checked', { ...base, checkedAt: start - 20000 });
+    assert.equal(checks().length, 6);
+    const readable = readableEvent(checks()[0]!).details;
+    for (const field of ['checkedAt', 'firstCheckedAt', 'lastCheckedAt', 'nextCheckAt', 'nextQuotaCheckAt', 'gateSuggestedCheckAt'])
+      assert.match(String(readable[field]), /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    assert.equal(readable.checkCount, 1);
+  } finally { db.close(); rmSync(directory, { recursive: true, force: true }); }
+});

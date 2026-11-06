@@ -43,7 +43,7 @@ export class MonitorService {
       this.db.journal(job.id).save(job); this.db.toggle(job.id, false);
       this.db.event(job.id, 'send_uncertain', { reason: job.reason });
     }
-    this.db.event(null, 'worker_started', { appVersion: process.env.CODEX_RESUME_VERSION ?? null, diagnosticsVersion: 2,
+    this.db.event(null, 'worker_started', { appVersion: process.env.CODEX_RESUME_VERSION ?? null, diagnosticsVersion: 3,
       pollSeconds: this.db.settings().pollSeconds, quotaCheck: this.db.settings().quotaCheck });
   }
   private getClient() {
@@ -153,7 +153,14 @@ export class MonitorService {
         check(); await client.send(id, prompt, check);
       },
     };
-    return new ResumeEngine(job, guarded, { ...realClock, now: this.now }, this.db.journal(job.id),
+    const journal = this.db.journal(job.id);
+    return new ResumeEngine(job, guarded, { ...realClock, now: this.now }, {
+      save: value => journal.save(value),
+      event: (type, details) => journal.event(type, type === 'quota_checked' ? {
+        ...details, gateSuggestedCheckAt: details?.nextCheckAt, checkedAt: this.quota?.checkedAt ?? this.now(),
+        nextCheckAt: this.nextQuotaCheckAt, nextQuotaCheckAt: this.nextQuotaCheckAt,
+      } : details),
+    },
       (_quota, now) => quotaCheckAt(now, this.db.settings().quotaCheck));
   }
   async command(command: Command) {

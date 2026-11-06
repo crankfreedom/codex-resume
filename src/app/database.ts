@@ -29,7 +29,8 @@ export class AppDatabase {
           COMMIT;`);
       } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     }
-    this.db.exec('PRAGMA user_version=2');
+    this.db.exec(`CREATE INDEX IF NOT EXISTS events_task_type ON events(task_id,type,id);
+      PRAGMA user_version=2;`);
   }
   settings(): Settings {
     const row = this.db.prepare('SELECT value FROM settings WHERE id=1').get();
@@ -76,6 +77,23 @@ export class AppDatabase {
     };
   }
   event(taskId: string | null, type: string, details: Record<string, unknown> = {}, taskName?: string) {
+    if (type === 'quota_checked' && taskId && typeof details.checkedAt === 'number') {
+      // 仅聚合日志；每次真实查询和状态机推进仍照常执行。旧事件不回写。
+      const previous = this.db.prepare("SELECT id,details FROM events WHERE task_id=? AND type='quota_checked' ORDER BY id DESC LIMIT 1").get(taskId);
+      const prior = previous ? JSON.parse(String(previous.details)) as Record<string, unknown> : undefined;
+      const signature = (value: Record<string, unknown>) => JSON.stringify(Object.fromEntries(Object.entries(value)
+        .filter(([key]) => !['nextCheckAt', 'nextQuotaCheckAt', 'gateSuggestedCheckAt', 'checkedAt', 'firstCheckedAt', 'lastCheckedAt', 'checkCount', 'periodicSummary'].includes(key))));
+      const same = prior && typeof prior.checkCount === 'number' && signature(prior) === signature(details);
+      const firstCheckedAt = same ? Number(prior.firstCheckedAt) : details.checkedAt;
+      if (same && details.checkedAt >= Number(prior.lastCheckedAt) && details.checkedAt - firstCheckedAt < 600000) {
+        this.db.prepare('UPDATE events SET details=? WHERE id=?').run(JSON.stringify({ ...details,
+          firstCheckedAt, lastCheckedAt: details.checkedAt, checkCount: Number(prior.checkCount) + 1,
+          periodicSummary: prior.periodicSummary ?? false }), previous!.id!);
+        return;
+      }
+      details = { ...details, firstCheckedAt: details.checkedAt, lastCheckedAt: details.checkedAt,
+        checkCount: 1, periodicSummary: Boolean(same && details.checkedAt - firstCheckedAt >= 600000) };
+    }
     const name = taskName ?? (taskId ? this.db.prepare('SELECT title FROM tasks WHERE id=?').get(taskId)?.title : null);
     this.db.prepare('INSERT INTO events(time,task_id,task_name,type,details) VALUES(?,?,?,?,?)')
       .run(Date.now(), taskId, name == null ? null : String(name), type, JSON.stringify(details));
@@ -94,7 +112,7 @@ export class AppDatabase {
         id: job.id, targetThreadId: job.targetThreadId, title: String(row.title), enabled: Boolean(row.enabled),
         phase: job.phase, reason: job.reason, createdAt: job.createdAt, updatedAt: Number(row.updated),
         nextCheckAt: job.nextCheckAt, resumeCount: job.resumeCount, maxResumes: job.maxResumes ?? 1,
-        prompt: job.prompt.replace(/^续跑投递标记：[^\n]+\n\n/, ''), evidence: job.evidence,
+        prompt: job.prompt.replace(/^续跑投递标记：[^\n]+\n\n/, ''), evidence: job.evidence, sentTurnId: job.sentTurnId,
         lastError: row.last_error == null ? undefined : String(row.last_error),
       };
     });
