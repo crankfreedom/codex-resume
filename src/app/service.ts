@@ -21,7 +21,7 @@ import { zonedDateTimeToEpoch } from './reset-time.ts';
 
 type Connection = DesktopPort & {
   call<T>(name: string, args: Record<string, unknown>): Promise<T>;
-  send(id: string, prompt: string, beforeDispatch?: (reconnected?:boolean) => void | Promise<void>): Promise<void>;
+  send(id: string, prompt: string, beforeDispatch?: (reconnected?:boolean) => void | Promise<void>, beforeWrite?:()=>void): Promise<void>;
   close(): void;
 };
 export class MonitorService {
@@ -40,6 +40,7 @@ export class MonitorService {
   private quotaInTick?: Quota;
   private now: () => number;
   private creating = new Set<string>();
+  private auxiliaryBusy=0;
   private authorizationEpoch=new Map<string,number>();
   private failedLogged = false;
   private makeClient: (caller: string, pipe?: string) => Connection;
@@ -123,6 +124,8 @@ export class MonitorService {
     const scheduledAt = zonedDateTimeToEpoch(command.localTime, command.timeZone);
     if (scheduledAt <= this.now()) throw new Error('预约时间必须晚于当前时间');
     const { quota, userAgent } = await this.getResetClient().read();
+    if(this.stopping) throw new Error('监控进程正在退出，未创建预约');
+    if(scheduledAt<=this.now()) throw new Error('读取期间预约时间已过，请重新选择未来时间');
     this.presentResetQuota(quota, userAgent);
     const selected = publicResetCards(quota).find(entry => entry.view.key === command.cardKey);
     if (!selected) throw new Error('指定卡片不在最新卡片明细中，请刷新后重新选择');
@@ -143,6 +146,11 @@ export class MonitorService {
   private async executeReset(id: string, reconcile = false) {
     const appointment = this.db.claimResetAppointment(id, this.now(), reconcile);
     this.db.event(null, 'reset_started', { appointmentId: id, idSuffix: appointment.idSuffix, requestId: appointment.requestId, reconcile });
+    const preflightFailure=(reason:string,message:string)=>{
+      const status=reconcile?'uncertain':'failed';
+      this.db.finishResetAppointment(id,status,this.now(),reason,message);
+      this.db.event(null,reconcile?'reset_uncertain':'reset_finished',{appointmentId:id,idSuffix:appointment.idSuffix,requestId:appointment.requestId,status,reason});
+    };
     let quota: ResetRateLimits;
     try {
       const read = await this.getResetClient().read();
@@ -150,27 +158,31 @@ export class MonitorService {
       let currentFingerprint: string;
       try { currentFingerprint = fingerprint(quota); } catch { throw new Error('账号身份不可用'); }
       if (currentFingerprint !== appointment.accountFingerprint) {
-        this.db.finishResetAppointment(id, 'failed', this.now(), 'account_changed', '账号已切换，禁止沿用旧账号预约执行');
+        preflightFailure('account_changed','账号已切换，禁止沿用旧账号预约执行');
         return;
       }
       const selected = publicResetCards(quota).find(entry => entry.raw.id === appointment.creditId);
       if (!selected) {
-        this.db.finishResetAppointment(id, 'failed', this.now(), 'credit_details_unavailable', '最新明细中没有指定卡片，禁止自动替换其他卡片');
+        preflightFailure('credit_details_unavailable','最新明细中没有指定卡片，禁止自动替换其他卡片');
         return;
       }
       if (selected.raw.status !== 'available') {
-        this.db.finishResetAppointment(id, 'failed', this.now(), 'credit_unavailable', `指定卡片状态为 ${selected.raw.status}，未发起兑换`);
+        preflightFailure('credit_unavailable',`指定卡片状态为 ${selected.raw.status}，本次未发起兑换，原请求结果需继续核对`);
         return;
       }
       if (selected.view.expiresAt !== null && selected.view.expiresAt <= this.now()) {
-        this.db.finishResetAppointment(id, 'failed', this.now(), 'credit_expired', '指定卡片已到期，未发起兑换');
+        preflightFailure('credit_expired','指定卡片已到期，本次未发起兑换');
         return;
       }
     } catch (error) {
       const message = (error as Error).message.slice(0, 500);
-      this.db.finishResetAppointment(id, 'failed', this.now(), 'preflight_failed', message);
-      this.db.event(null, 'reset_finished', { appointmentId: id, idSuffix: appointment.idSuffix, requestId: appointment.requestId, status: 'failed', reason: 'preflight_failed' });
+      preflightFailure('preflight_failed',message);
       return;
+    }
+    if(this.stopping) {preflightFailure('shutdown_before_consume','监控正在退出，本次未发起兑换');return;}
+    if(!reconcile && this.now()-appointment.scheduledAt>resetExecutionGraceMs) {
+      this.db.finishResetAppointment(id,'missed',this.now(),'execution_missed','执行前读取期间错过允许时刻，未发起兑换');
+      this.db.event(null,'reset_missed',{appointmentId:id,requestId:appointment.requestId});return;
     }
     let outcome: ResetConsumeOutcome;
     try {
@@ -203,11 +215,11 @@ export class MonitorService {
     if (!this.failedLogged) this.db.event(null, 'desktop_disconnected', { message: this.connection.message });
     this.failedLogged = true;
   }
-  private async refreshThreads() {
-    const client = this.getClient();
-    const list = await client.call<{ threads: unknown[]; pinnedThreads?: unknown[] }>('list_threads', { limit: 50 });
+  private threadSummaries(list:{threads:unknown[];pinnedThreads?:unknown[]}):ThreadSummary[] {
+    if(!Array.isArray(list?.threads) || (list.pinnedThreads!==undefined && !Array.isArray(list.pinnedThreads))) throw new Error('会话列表结构不兼容');
     const summaries = [...(list.pinnedThreads ?? []), ...(list.threads ?? [])];
-    this.threads = [...new Map(summaries.flatMap(raw => {
+    return [...new Map(summaries.flatMap(raw => {
+      if(!raw || typeof raw!=='object')return [];
       const t = raw as Record<string, unknown>;
       if (t.kind !== 'codex' || (t.hostId && t.hostId !== 'local') || typeof t.id !== 'string') return [];
       const status = t.status && typeof t.status === 'object' ? String((t.status as { type?: string }).type ?? 'unknown') : String(t.status ?? 'unknown');
@@ -215,6 +227,11 @@ export class MonitorService {
         cwd: String(t.cwd ?? (t.project as { cwd?: string } | undefined)?.cwd ?? ''),
         updatedAt: typeof t.updatedAt === 'string' ? t.updatedAt : undefined }] as const];
     })).values()];
+  }
+  private async refreshThreads() {
+    const client = this.getClient();
+    const list = await client.call<{ threads: unknown[]; pinnedThreads?: unknown[] }>('list_threads', { limit: 50 });
+    this.threads=this.threadSummaries(list);
     this.connection = { state: 'connected', message: '已连接本机 Codex 桌面 App', checkedAt: this.now() };
     if (this.failedLogged) this.db.event(null, 'desktop_reconnected');
     this.failedLogged = false; this.lastRefresh = this.now();
@@ -333,7 +350,7 @@ export class MonitorService {
             const cancelled=new DispatchCancelledBeforeSend('派发前只读复查未通过：'+(error as Error).message);cancelled.reason='dispatch_preflight_unavailable';throw cancelled;
           }
           check();
-        });
+        },check);
       },
     };
     const journal = this.db.journal(job.id);
@@ -387,9 +404,8 @@ export class MonitorService {
       reader = this.makeClient(settings.callerThreadId || discoverCaller(),settings.pipe || undefined);
       const quota = await reader.quota();
       readQuota = { ...quotaGate(quota, 'codex', now), checkedAt: now };
-      const list = await reader.call<{threads: unknown[]}>('list_threads',{limit:50});
-      if (!Array.isArray(list.threads)) throw new Error('会话列表结构不兼容');
-      this.threads=list.threads.flatMap(raw=>{if(!raw || typeof raw!=='object')return [];const t=raw as Record<string,unknown>;if(t.kind!=='codex' || (t.hostId && t.hostId!=='local') || typeof t.id!=='string')return [];return [{id:t.id,title:String(t.title ?? '未命名会话'),status:typeof t.status==='string'?t.status:String((t.status as {type?:string})?.type ?? 'unknown'),cwd:String(t.cwd ?? '')}];});
+      const list = await reader.call<{threads: unknown[];pinnedThreads?:unknown[]}>('list_threads',{limit:50});
+      this.threads=this.threadSummaries(list);
       checks.push(check('connection','连接与必要接口','pass',settings.pipe ? '使用指定管道，已校验工具目录与只读响应' : '自动发现唯一管道，已校验工具目录与只读响应','升级 Codex 后可重新运行自检',now));
       for (const {job, enabled} of this.db.jobs()) {
         try {
@@ -418,12 +434,16 @@ export class MonitorService {
       this.inspection = {checkedAt:now,source:'read_only',checks,tasks,quota:readQuota};
     }
   }
+  private async auxiliary<T>(operation:()=>Promise<T>):Promise<T> {
+    this.auxiliaryBusy++;
+    try {return await operation();} finally {this.auxiliaryBusy--;}
+  }
   async command(command: Command) {
     if (this.stopping) throw new Error('监控进程正在退出');
     // 由 worker 返回新数据库快照，不查询额度或推进托管任务。
     if (command.type === 'refreshData') return;
-    if (command.type === 'resetCardsRefresh') { await this.refreshResetCards(); return; }
-    if (command.type === 'resetSchedule') { await this.scheduleReset(command); return; }
+    if (command.type === 'resetCardsRefresh') { await this.auxiliary(()=>this.refreshResetCards()); return; }
+    if (command.type === 'resetSchedule') { await this.auxiliary(()=>this.scheduleReset(command)); return; }
     if (command.type === 'resetCancel') {
       this.db.cancelResetAppointment(command.id, this.now());
       this.db.event(null, 'reset_cancelled', { appointmentId: command.id }); return;
@@ -431,7 +451,7 @@ export class MonitorService {
     if (command.type === 'resetReconcile') {
       if (this.busy) throw new Error('后台正在检查，请稍后核对原请求');
       this.busy = true;
-      try { await this.executeReset(command.id, true); } finally { this.busy = false; }
+      try { await this.executeReset(command.id, true); } finally { this.quotaInTick=undefined;this.busy = false; }
       return;
     }
     if (command.type === 'refreshStatus' || command.type === 'selfCheck') { await this.inspect(); return; }
@@ -473,7 +493,7 @@ export class MonitorService {
       if (this.connection.state !== 'connected') throw new Error('请先连接 Codex');
       const target = this.threads.find(t => t.id === command.targetThreadId);
       if (!target) throw new Error('目标不在本机已读取的会话列表中，请刷新后重试');
-      if (this.creating.has(target.id) || this.db.tasks().some(t => t.targetThreadId === target.id && (t.enabled || this.db.unresolved(t.id)))) throw new Error('该会话已在托管');
+      if (this.creating.has(target.id) || this.db.tasks().some(t => t.targetThreadId === target.id && (t.enabled || this.db.unresolved(t.id) || ['sending','verifying','send_uncertain'].includes(t.phase)))) throw new Error('该会话已在托管');
       this.creating.add(target.id);
       try {
         const client = this.getClient();
@@ -515,6 +535,12 @@ export class MonitorService {
         if (config.mode==='auto' && entry.job.resumeCount >= (entry.job.maxResumes ?? 1)) throw new Error('累计续跑次数已达到上限');
         if(this.stopping || this.authorizationEpoch.get(command.id)!==epoch || this.db.config(command.id).revision!==config.revision || this.db.unresolved(command.id)) throw new Error('重新授权期间状态已变化，请再次核验');
         if (config.requiresConfirmation) {
+          if(this.db.db.prepare('SELECT 1 FROM attempts WHERE marker=?').get(entry.job.marker)) {
+            const marker=`CODEX_RESUME_ACK_${randomUUID().replaceAll('-','')}`;
+            entry.job.prompt=entry.job.prompt.replace(`续跑投递标记：${entry.job.marker}\n\n`,`续跑投递标记：${marker}\n\n`);
+            entry.job.marker=marker;entry.job.sentTurnId=undefined;entry.job.sentAt=undefined;
+            entry.job.baselineTurnIds=[];entry.job.cancelledBeforeDispatchMarker=undefined;
+          }
           entry.job.phase='observing'; entry.job.reason=undefined;
           this.db.journal(command.id).save(entry.job); config.requiresConfirmation=false;this.db.setConfig(command.id,config);
           this.db.event(command.id,'authorization_confirmed',{revision:config.revision});
@@ -526,7 +552,7 @@ export class MonitorService {
       // 读取期间暂停要保留互斥，当前 tick 完成后才能释放。
       if (!command.enabled && !this.busy && !this.db.unresolved(command.id)) this.release(command.id);
     } else if (command.type === 'remove') {
-      if (this.db.unresolved(command.id)) throw new Error('存在未落定投递，不可删除或重建，请先只读核对');
+      if (this.db.unresolved(command.id) || ['sending','verifying','send_uncertain'].includes(entry.job.phase)) throw new Error('存在未落定投递，不可删除或重建，请先只读核对');
       if (entry.enabled || this.busy) throw new Error('请先暂停托管，等待当前检查结束后移除');
       this.release(command.id); this.db.remove(command.id);
     } else if (command.type === 'reconcile') {
@@ -540,7 +566,7 @@ export class MonitorService {
   async stop() {
     this.requestStop();
     // 正在读/发送的请求由传输层超时收敛，等待后关闭数据库。
-    while (this.busy || this.creating.size) await new Promise(resolve => setTimeout(resolve, 50));
+    while (this.busy || this.creating.size || this.auxiliaryBusy) await new Promise(resolve => setTimeout(resolve, 50));
     this.client?.close();
     for (const id of this.leases.keys()) this.release(id);
     this.db.event(null, 'worker_stopped'); this.db.close();

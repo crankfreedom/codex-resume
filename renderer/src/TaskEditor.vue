@@ -6,7 +6,7 @@ import TaskPolicyFields from './TaskPolicyFields.vue';
 const props=defineProps<{task:ManagedTask}>(); const store=useMonitor(); const open=ref(false);
 const prompt=ref(''); const max=ref(3); const policy=ref<TaskConfig>(structuredClone({...props.task.config,window:{...props.task.config.window}}));
 function edit(){prompt.value=props.task.prompt;max.value=props.task.maxResumes;policy.value=JSON.parse(JSON.stringify(props.task.config));open.value=true;}
-async function save(){if(await store.command({type:'edit',id:props.task.id,revision:props.task.config.revision,value:{...policy.value,prompt:prompt.value,maxResumes:max.value}}))open.value=false;}
+async function save(){if(await store.command({type:'edit',id:props.task.id,revision:policy.value.revision,value:{...policy.value,prompt:prompt.value,maxResumes:max.value}}))open.value=false;}
 </script>
 <template>
 <el-button :disabled="task.enabled || task.slotHeld || ['sending','verifying','send_uncertain'].includes(task.phase)" @click="edit">暂停后编辑配置</el-button>

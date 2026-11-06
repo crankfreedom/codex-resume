@@ -100,7 +100,8 @@ let timer: ReturnType<typeof setInterval>;
 onMounted(() => { void store.start(); timer = setInterval(() => { now.value = Date.now(); }, 1000); });
 onUnmounted(() => { clearInterval(timer); store.stop(); });
 async function choose(thread: ThreadSummary) { selected.value = thread; consent.value = false;newPolicy.value=defaultTaskConfig();
-  templates.value=(await window.resume.query({type:'templates'})).templates ?? [];templateId.value=templates.value.find(t=>t.isDefault)?.id ?? '';useTemplate(templateId.value);
+  try {templates.value=(await window.resume.query({type:'templates'})).templates ?? [];templateId.value=templates.value.find(t=>t.isDefault)?.id ?? '';useTemplate(templateId.value);}
+  catch(error){selected.value=null;ElMessage.error((error as Error).message);}
 }
 async function add() {
   if (!selected.value || !consent.value) return;

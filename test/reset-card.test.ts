@@ -184,3 +184,53 @@ test('执行中重启转为结果不确定，不自动补用，仅可原键核�
     assert.equal(reset.consumeCalls, 0);
   } finally { await restored?.stop(); await cleanup(); }
 });
+
+test('人工核对重置卡后的额度不能跨调度轮复用',async()=>{
+  const start=Date.UTC(2026,10,6,0,0);let now=start;
+  const {service,desktop,reset,cleanup}=setup(()=>now);try{
+    service.db.setSettings({...service.db.settings(),callerThreadId:desktop.target,pollSeconds:10});
+    const appointment=await schedule(service,'2026-11-06T09:00');
+    now=appointment.scheduledAt;reset.consumeError=new Error('模拟响应不确定');await service.tick(true);
+    reset.consumeError=undefined;reset.outcomes=['alreadyRedeemed'];
+    desktop.quota=async()=>exampleQuota(0,now);
+    await service.command({type:'resetReconcile',id:appointment.id});
+    // 下一调度仅到任务检查时间，额度周期未到；必须重新查询后才能推进托管。
+    desktop.view={thread:{id:desktop.target,status:{type:'idle'}},turns:[{id:'blocked',status:'failed',error:{code:'UsageLimitExceeded'}}]};
+    desktop.call=async<T>()=>({threads:[{id:desktop.target,title:'夹具目标',kind:'codex',hostId:'local',status:'idle'}]} as T);
+    await service.command({type:'refreshStatus'});
+    await service.command({type:'add',targetThreadId:desktop.target,prompt:'继续夹具',maxResumes:3});
+    let sends=0;desktop.send=async()=>{sends++;};desktop.quota=async()=>exampleQuota(100,now+3600000);
+    now+=11000;await service.tick();assert.equal(sends,0);assert.equal(service.db.slots(),0);
+  }finally{await cleanup();}
+});
+
+test('重置卡执行前读取耗时跨过允许执行时刻，不延迟消费',async()=>{
+  const start=Date.UTC(2026,10,6,0,0);let now=start;
+  const {service,reset,cleanup}=setup(()=>now);try{
+    const appointment=await schedule(service,'2026-11-06T09:00');now=appointment.scheduledAt;
+    const original=reset.read.bind(reset);reset.read=async()=>{now+=resetExecutionGraceMs+1;return original();};
+    await service.tick();assert.equal(reset.consumeCalls,0);assert.equal(service.db.resetAppointment(appointment.id).status,'missed');
+  }finally{await cleanup();}
+});
+
+test('不确定兑换核对失败仍保留不确定，不能按明确失败重新预约',async()=>{
+  const start=Date.UTC(2026,10,6,0,0);let now=start;
+  const {service,reset,cleanup}=setup(()=>now);try{
+    const appointment=await schedule(service,'2026-11-06T09:00');now=appointment.scheduledAt;
+    reset.consumeError=new Error('模拟响应丢失');await service.tick();
+    reset.quota.rateLimitResetCredits!.credits![0]!.status='redeemed';
+    await service.command({type:'resetReconcile',id:appointment.id});
+    assert.equal(service.db.resetAppointment(appointment.id).status,'uncertain');assert.equal(reset.consumeCalls,1);
+    reset.quota.rateLimitResetCredits!.credits![0]!.status='available';
+    await assert.rejects(schedule(service,'2026-11-06T10:00'),/已有待执行/);
+  }finally{await cleanup();}
+});
+
+test('异步预约读取期间退出，不在退出后创建预约，也不提前关闭数据库',async()=>{
+  const {service,reset,cleanup}=setup(()=>Date.UTC(2026,10,6,0,0));try{
+    let entered!:()=>void;const ready=new Promise<void>(r=>entered=r);let release!:()=>void;
+    const original=reset.read.bind(reset);reset.read=async()=>{entered();await new Promise<void>(r=>release=r);return original();};
+    const pending=schedule(service,'2026-11-06T09:00');const rejected=assert.rejects(pending,/退出/);await ready;
+    const stopped=service.stop();release();await rejected;await stopped;assert.equal(reset.consumeCalls,0);
+  }finally{await cleanup();}
+});

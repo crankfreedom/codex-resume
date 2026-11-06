@@ -11,23 +11,29 @@ const revisions=ref<DataResult['revisions']>([]);
 const attempts=ref<DataResult['attempts']>([]); const next=ref<number>(); const boundary=ref<number>();
 const task=ref(props.taskId ?? ''); const type=ref(''); const reason=ref(''); const from=ref(''); const to=ref('');
 const phases=computed(()=>lifecycle(events.value,attempts.value ?? []));
+let querySequence=0;
+const appliedFilter=ref<EventFilter>({});
 const loading=ref(false); const selectedTitle=ref('');
 const time=(n:number|null)=>n===null?'未知':formatDataTime(n);
 function filter():EventFilter {return {taskId:task.value || undefined,type:type.value || undefined,reason:reason.value || undefined,
   from:from.value?new Date(from.value).getTime():undefined,to:to.value?new Date(to.value).getTime():undefined};}
 async function load(older=false) {
+  const sequence=++querySequence;
   loading.value=true;
+  if(!older)appliedFilter.value=filter();
   try {
     const result=await window.resume.query(tab.value==='archives'?{type:'archives',limit:50,cursor:older?next.value:undefined}:
       tab.value==='timeline'?{type:'timeline',taskId:task.value,limit:50,cursor:older?next.value:undefined,boundary:older?boundary.value:undefined}:
-      {type:'events',filter:filter(),limit:50,cursor:older?next.value:undefined,boundary:older?boundary.value:undefined});
+      {type:'events',filter:JSON.parse(JSON.stringify(appliedFilter.value)),limit:50,cursor:older?next.value:undefined,boundary:older?boundary.value:undefined});
+    if(sequence!==querySequence)return;
     archives.value=result.archives ?? []; events.value=result.events ?? []; attempts.value=result.attempts ?? [];revisions.value=result.revisions ?? [];
     next.value=result.nextCursor; boundary.value=result.boundary;
-  } catch(e) {ElMessage.error((e as Error).message);} finally {loading.value=false;}
+  } catch(e) {ElMessage.error((e as Error).message);} finally {if(sequence===querySequence)loading.value=false;}
 }
-async function logs(id:string){task.value=id;tab.value='events';await load();}
-async function timeline(id:string,title='') {task.value=id;selectedTitle.value=title;tab.value='timeline';await load();}
-async function exportAll() {try {const path=await window.resume.exportEvents(filter());if(path) ElMessage.success('已导出 '+path);}catch(e){ElMessage.error((e as Error).message);}}
+function clearFilters(){type.value='';reason.value='';from.value='';to.value='';}
+async function logs(id:string){clearFilters();task.value=id;tab.value='events';await load();}
+async function timeline(id:string,title='') {clearFilters();task.value=id;selectedTitle.value=title;tab.value='timeline';await load();}
+async function exportAll() {try {const path=await window.resume.exportEvents(tab.value==='timeline'?{taskId:task.value}:filter());if(path) ElMessage.success('已导出 '+path);}catch(e){ElMessage.error((e as Error).message);}}
 onMounted(()=>void load());
 </script>
 <template>

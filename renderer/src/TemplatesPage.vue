@@ -1,9 +1,10 @@
 <script setup lang="ts">
+import {ElMessage} from 'element-plus';
 import {onMounted,ref} from 'vue';
 import {useMonitor} from './store.ts';
 import type {PromptTemplate} from '../../src/app/contracts.ts';
 const store=useMonitor();const rows=ref<PromptTemplate[]>([]);const draft=ref<PromptTemplate>({id:'',name:'',body:'',isDefault:false});
-async function load(){rows.value=(await window.resume.query({type:'templates'})).templates ?? [];}
+async function load(){try{rows.value=(await window.resume.query({type:'templates'})).templates ?? [];}catch(error){ElMessage.error((error as Error).message);}}
 function edit(row?:PromptTemplate){draft.value=row?{...row}:{id:crypto.randomUUID(),name:'',body:'',isDefault:false};}
 async function save(){if(await store.command({type:'templateSave',value:draft.value})){await load();edit();}}
 async function remove(id:string){if(await store.command({type:'templateDelete',id}))await load();}

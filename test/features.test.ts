@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AppDatabase } from '../src/app/database.ts';
 
-test('旧库事务升级到 v3，四表原值及累计次数保留，重开幂等，未知高版拒绝', () => {
+test('旧库事务升级保留 v3 数据并兼容当前 v4，四表原值及累计次数保留，重开幂等，未知高版拒绝', () => {
   const dir = mkdtempSync(join(tmpdir(), 'resume-migration-')); const path = join(dir, 'fixture.sqlite');
   try {
     const old = new DatabaseSync(path);
@@ -25,7 +25,10 @@ test('旧库事务升级到 v3，四表原值及累计次数保留，重开幂�
       assert.deepEqual(JSON.parse(String(db.db.prepare('SELECT job FROM tasks').get()!.job)),{resumeCount:2,prompt:'原授权'});
       assert.equal(db.db.prepare('SELECT count(*) AS n FROM attempts').get()!.n,1);
       assert.equal(db.db.prepare('SELECT slot FROM attempts').get()!.slot,'held');
-      assert.equal(db.events()[0]!.taskName,'旧任务'); assert.equal(db.settings().pollSeconds,30); db.close();
+      assert.equal(db.events()[0]!.taskName,'旧任务'); assert.equal(db.settings().pollSeconds,30);
+      if(i===0)db.event('lost-task','task_removed',{},'旧任务');
+      else {const lost=db.query({type:'archives'}).archives!.find(a=>a.id==='lost-task')!;assert.equal(lost.incomplete,true);assert.equal(lost.endedAt,null);assert.equal(lost.resumeCount,null);assert.equal(lost.reason,'legacy_incomplete');}
+      db.close();
     }
     const future = new DatabaseSync(path); future.exec('PRAGMA user_version=99'); future.close();
     assert.throws(()=>new AppDatabase(path),/拒绝降级/);
@@ -51,6 +54,10 @@ test('日志超过150条、同时间稳定游标、日期与异常筛选、快�
     const rows=readFileSync(join(dir,'all.jsonl'),'utf8').trim().split('\n').map(line=>JSON.parse(line));
     assert.deepEqual(rows.map(e=>e.id),Array.from({length:251},(_,i)=>i+1));assert.equal(rows[0].details.reason,'account_changed');
     assert.equal(await exportEventRange(path,join(dir,'recent.jsonl'),{},true),150);
+    const midnight=new Date(2026,10,7).getTime();
+    for(const time of [midnight-1000,midnight+1000])db.db.prepare('INSERT INTO events(time,type,details) VALUES(?,?,?)').run(time,'cross_day','{}');
+    const day=db.query({type:'events',filter:{from:new Date('2026-11-07T00:00').getTime(),to:new Date('2026-11-08T00:00').getTime(),type:'cross_day'}});
+    assert.equal(day.events!.length,1);assert.equal(day.events![0]!.time,midnight+1000);
   } finally {db.close();rmSync(dir,{recursive:true,force:true});}
 });
 

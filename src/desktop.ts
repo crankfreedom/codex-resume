@@ -111,7 +111,7 @@ export class DesktopClient implements DesktopPort {
     for (const waiter of this.pending.values()) { clearTimeout(waiter.timer); waiter.reject(error); }
     this.pending.clear();
   }
-  async call<T>(name: string, argumentsValue: Record<string, unknown>, beforeDispatch?: (reconnected?:boolean) => void | Promise<void>): Promise<T> {
+  async call<T>(name: string, argumentsValue: Record<string, unknown>, beforeDispatch?: (reconnected?:boolean) => void | Promise<void>, beforeWrite?:()=>void): Promise<T> {
     if (!allowed.has(name)) throw new Error(`不允许的桌面操作：${name}`);
     const previousSocket=this.socket;
     await this.connect();
@@ -119,6 +119,7 @@ export class DesktopClient implements DesktopPort {
     const socket=this.socket;
     await beforeDispatch?.(previousSocket!==this.socket);
     if(beforeDispatch && (this.socket!==socket || !socket || socket.destroyed)) throw new DispatchCancelledBeforeSend('发送前读取期间连接已变化，请重新检查');
+    beforeWrite?.();
     const result = await this.request('tools/call', {
       namespace: tool.namespace, tool: tool.name, arguments: argumentsValue,
       callerSource: 'codex', threadId: this.callerThreadId, hostId: 'local',
@@ -140,9 +141,9 @@ export class DesktopClient implements DesktopPort {
     }
     return view;
   }
-  async send(id: string, prompt: string, beforeDispatch?: (reconnected?:boolean) => void | Promise<void>) {
+  async send(id: string, prompt: string, beforeDispatch?: (reconnected?:boolean) => void | Promise<void>, beforeWrite?:()=>void) {
     // 发送没有幂等承诺，任何不确定响应都交由状态机保守处理，不在连接层自动重试。
-    await this.call('send_message_to_thread', { threadId: id, hostId: 'local', prompt }, beforeDispatch);
+    await this.call('send_message_to_thread', { threadId: id, hostId: 'local', prompt }, beforeDispatch,beforeWrite);
   }
   close() {
     const socket = this.socket;

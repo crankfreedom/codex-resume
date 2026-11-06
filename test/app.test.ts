@@ -26,8 +26,8 @@ class FakeDesktop {
   async quota() { this.quotaCalls++; if (this.quotaError) throw this.quotaError; return structuredClone(this.quotaValue); }
   async call<T>() { return { pinnedThreads: [], threads: [{ id: this.target, title: '测试长任务', kind: 'codex', hostId: 'local', status: { type: 'idle' } }] } as T; }
   async readThread() { await this.afterRead?.(); return structuredClone(this.view); }
-  async send(_id: string, prompt: string, beforeDispatch?: (reconnected?:boolean) => void | Promise<void>) {
-    this.onSend?.(); await beforeDispatch?.(); this.sends++;
+  async send(_id: string, prompt: string, beforeDispatch?: (reconnected?:boolean) => void | Promise<void>,beforeWrite?:()=>void) {
+    this.onSend?.(); await beforeDispatch?.(); beforeWrite?.(); this.sends++;
     this.view.turns.unshift({ id: 'sent-' + this.sends, status: 'completed', items: [
       { type: 'functionCallOutput', namespace: 'codex_app', name: 'send_message_to_thread', output: { text: prompt } },
       { type: 'agentMessage', text: '业务完成' },
@@ -717,5 +717,15 @@ test('编辑上限等于已使用次数可仅观察，自动续跑仍不能重�
     desktop.quotaValue=exampleQuota(0,Date.now());await service.tick(true);assert.equal(desktop.sends,0);assert.equal(service.db.tasks()[0]!.resumeCount,2);
     await service.command({type:'toggle',id:job.id,enabled:false});await service.command({type:'edit',id:job.id,revision:2,value:{...config,mode:'auto',prompt:'继续',maxResumes:2}});
     await assert.rejects(service.command({type:'toggle',id:job.id,enabled:true,confirmedRevision:3}),/累计续跑次数/);
+  }finally{await cleanup();}
+});
+
+test('只读刷新保留置顶会话并按 ID 去重，与后台列表一致',async()=>{
+  const {service,desktop,cleanup}=await setup();try{
+    const pinned={id:desktop.target,title:'仅置顶目标',kind:'codex',hostId:'local',status:'idle',project:{cwd:'D:/fixture'}};
+    desktop.call=async<T>()=>({pinnedThreads:[pinned],threads:[]} as T);
+    await service.tick(true);assert.equal(service.snapshot().threads[0]!.id,desktop.target);
+    await service.command({type:'refreshStatus'});assert.equal(service.snapshot().threads[0]?.id,desktop.target);
+    assert.equal(service.snapshot().threads[0]?.cwd,'D:/fixture');assert.equal(desktop.sends,0);
   }finally{await cleanup();}
 });

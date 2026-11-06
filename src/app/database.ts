@@ -295,6 +295,7 @@ export class AppDatabase {
         this.db.exec('BEGIN IMMEDIATE');
         try {
           const existing=this.db.prepare('SELECT * FROM attempts WHERE marker=?').get(job.marker);
+          if(job.phase==='sending' && existing?.slot==='released') throw new Error('投递标记已结束，请建立新的投递周期');
           if (job.phase==='sending' && !existing) {
             const config=this.config(id); const queue=this.settings().queue;
             if (!this.enabled(id) || config.mode!=='auto' || (queue.enabled && this.slots()>=queue.limit)) throw new Error('投递策略或槽位已变化，未创建意图');

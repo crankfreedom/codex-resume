@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { useMonitor } from './store.ts';
 import { formatDataTime } from '../../src/app/event-data.ts';
@@ -45,7 +45,9 @@ async function refresh() {
 function preview() {
   const card = selectedCard.value;
   if (!card) return;
-  const scheduledAt = zonedDateTimeToEpoch(localTime.value, timeZone.value);
+  let scheduledAt:number;
+  try {scheduledAt=zonedDateTimeToEpoch(localTime.value,timeZone.value);}catch{return;}
+
   return {
     card, scheduledAt,
     display: formatInTimeZone(scheduledAt, timeZone.value),
@@ -54,7 +56,7 @@ function preview() {
 }
 async function schedule() {
   const value = preview();
-  if (!value) { ElMessage.warning('请先选择可用卡片'); return; }
+  if (!value) { ElMessage.warning('请选择可用卡片并填写有效的日期、时间与时区'); return; }
   if (value.scheduledAt <= Date.now()) { ElMessage.warning('预约时间必须晚于当前时间'); return; }
   if (value.card.expiresAt !== null && value.card.expiresAt <= value.scheduledAt) { ElMessage.warning('卡片将在预约时间前到期'); return; }
   try {
@@ -83,7 +85,8 @@ async function reconcile(appointment: ResetAppointmentView) {
   } catch { return; }
   if (await store.command({ type: 'resetReconcile', id: appointment.id })) { ElMessage.success('核对已提交，请查看执行记录'); await load(); }
 }
-onMounted(() => { void refresh(); });
+watch(()=>store.snapshot?.runtime.heartbeatAt,()=>{void load().catch(error=>ElMessage.error((error as Error).message));});
+onMounted(() => { void refresh().catch(error=>ElMessage.error((error as Error).message)); });
 </script>
 
 <template>

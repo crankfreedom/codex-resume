@@ -13,12 +13,12 @@ class Fleet {
   caller=randomUUID(); ids=[randomUUID(),randomUUID(),randomUUID()]; used=100;
   views=new Map<string,ThreadView>(this.ids.map(id=>[id,{thread:{id,status:{type:'idle'}},turns:[{id:'blocked-'+id,status:'failed',error:{code:'UsageLimitExceeded'}}]} as ThreadView]));
   goals=new Map<string,CurrentGoal>(); sent:string[]=[]; hidden=false; uncertain=false;
-  reconnected=false;beforeSend?:()=>Promise<void>; onIntent?:()=>void;
+  afterPreflight?:()=>Promise<void>;reconnected=false;beforeSend?:()=>Promise<void>; onIntent?:()=>void;
   async quota(){return exampleQuota(this.used,Date.now());}
   async call<T>(){return {threads:this.ids.map((id,i)=>({id,title:'队列任务'+i,kind:'codex',hostId:'local',status:'idle'}))} as T;}
   async readThread(id:string){const view=structuredClone(this.views.get(id)!);if(this.hidden)view.turns=view.turns.filter(t=>!t.id.startsWith('own-'));return view;}
-  async send(id:string,prompt:string,beforeDispatch?:(reconnected?:boolean)=>void|Promise<void>){
-    this.onIntent?.();await this.beforeSend?.();await beforeDispatch?.(this.reconnected);this.sent.push(id);
+  async send(id:string,prompt:string,beforeDispatch?:(reconnected?:boolean)=>void|Promise<void>,beforeWrite?:()=>void){
+    this.onIntent?.();await this.beforeSend?.();await beforeDispatch?.(this.reconnected);await this.afterPreflight?.();beforeWrite?.();this.sent.push(id);
     const view=this.views.get(id)!;view.thread.status.type='active';view.turns.unshift({id:'own-'+id,status:'inProgress',items:[{type:'userMessage',text:prompt}]});
     if(this.uncertain)throw new Error('模拟响应丢失');
   }
@@ -135,5 +135,28 @@ test('已提交轮次到期或Goal暂停继续占槽；只读自检即使看到�
     const before=f.service.db.jobs();await f.service.command({type:'selfCheck'});
     assert.equal(f.service.db.slots(),1);assert.deepEqual(f.service.db.jobs(),before);
     await f.service.tick(true);assert.equal(f.desktop.sent.length,2);assert.equal(f.service.db.slots(),1);
+  }finally{await f.close();}
+});
+
+test('异步派发复查完成后暂停，在实际写入之前仍被同步门禁阻止',async()=>{
+  const f=await fixture();try{
+    const task=await f.add(0);await f.service.tick(true);f.desktop.used=0;
+    f.desktop.afterPreflight=async()=>{await f.service.command({type:'toggle',id:task.id,enabled:false});};
+    await f.service.tick(true);assert.equal(f.desktop.sent.length,0);assert.equal(f.service.db.slots(),0);assert.equal(f.service.db.tasks()[0]!.resumeCount,0);
+  }finally{await f.close();}
+});
+
+test('确定派发前取消后重新授权使用新标记，旧尝试保留且新投递重新占槽',async()=>{
+  const f=await fixture();try{
+    const task=await f.add(0);await f.service.tick(true);f.desktop.used=0;
+    f.desktop.afterPreflight=async()=>{await f.service.command({type:'toggle',id:task.id,enabled:false});};
+    await f.service.tick(true);assert.equal(f.service.db.slots(),0);const oldMarker=f.service.db.jobs()[0]!.job.marker;
+    f.desktop.afterPreflight=undefined;
+    await f.service.command({type:'edit',id:task.id,revision:1,value:{...task.config,prompt:'确认后继续',maxResumes:3}});
+    await f.service.command({type:'toggle',id:task.id,enabled:true,confirmedRevision:2});
+    await f.service.tick(true);assert.equal(f.desktop.sent.length,1);assert.equal(f.service.db.slots(),1);
+    const attempts=f.service.db.query({type:'timeline',taskId:task.id}).attempts!;
+    assert.equal(attempts.length,2);assert.equal(attempts.find(a=>a.marker===oldMarker)!.slot,'released');
+    assert.notEqual(f.service.db.jobs()[0]!.job.marker,oldMarker);assert.equal(f.service.db.tasks()[0]!.resumeCount,1);
   }finally{await f.close();}
 });
