@@ -56,6 +56,17 @@ try {
   assert.equal(snapshot.events.find(event => event.type === 'worker_started').details.appVersion, version);
   assert.equal(snapshot.events.find(event => event.type === 'worker_started').details.diagnosticsVersion, 3);
   assert.ok(!JSON.stringify(snapshot).includes('accountId'));
+  const priorSchedule=snapshot.nextQuotaCheckAt;
+  await window.getByRole('button',{name:'刷新状态（只读）',exact:true}).click();
+  await expect.poll(async()=> (await window.evaluate(()=>window.resume.snapshot())).inspection?.source,{timeout:60000}).toBe('read_only');
+  const inspection=await window.evaluate(()=>window.resume.snapshot());
+  assert.equal(inspection.nextQuotaCheckAt,priorSchedule);assert.equal(inspection.tasks.length,0);
+  assert.equal(inspection.inspection.source,'read_only');assert.ok(inspection.inspection.checks.some(c=>c.key==='connection' && c.status==='pass'));
+  assert.equal(inspection.events.some(e=>e.type==='send_intent_persisted'),false);
+  await instance.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0].setSize(1000,700));
+  await window.locator('.inspection').screenshot({path:join(artifacts,'inspection-narrow.png'),animations:'disabled'});
+  assert.equal(await window.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth),false);
+  await instance.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0].setSize(1240,850));
   await window.screenshot({ path: join(artifacts, 'overview.png'), animations: 'disabled' });
   await window.getByRole('button', { name: '? 使用说明', exact: true }).click();
   await window.getByRole('heading', { name: 'Codex Resume 使用说明书', exact: true }).waitFor();
@@ -103,7 +114,7 @@ try {
   await manualQuery.fill('刷新');
   await window.getByRole('navigation', { name: '说明书目录' }).getByRole('button', { name: /数据何时更新/ }).click();
   await window.getByRole('heading', { name: '数据何时更新', exact: true }).waitFor();
-  await window.getByText('刷新也可能推进自动续跑', { exact: true }).scrollIntoViewIfNeeded();
+  await window.getByText('立即检查可能推进自动续跑', { exact: true }).scrollIntoViewIfNeeded();
   await window.mouse.move(articleBounds.x + articleBounds.width - 20, articleBounds.y + 20);
   await window.keyboard.press('Escape');
   await expect(directoryPanel).toBeHidden();
@@ -208,7 +219,7 @@ try {
   await window.getByRole('button', { name: '◫ 运行总览', exact: true }).click();
   await expect.poll(() => window.locator('h1').evaluate(element => getComputedStyle(element).fontSize)).toBe('34px');
   await expect(window.locator('html')).toHaveAttribute('data-theme', 'iris');
-  assert.equal(await window.getByRole('button', { name: '↻ 刷新', exact: true }).evaluate(element => getComputedStyle(element).fontSize), '20px');
+  assert.equal(await window.getByRole('button', { name: '立即检查', exact: true }).evaluate(element => getComputedStyle(element).fontSize), '20px');
   await window.screenshot({ path: join(artifacts, 'appearance-overview.png'), animations: 'disabled' });
   await window.getByRole('button', { name: '? 使用说明', exact: true }).click();
   assert.equal(await window.locator('.manual-block p').first().evaluate(element => getComputedStyle(element).fontSize), '20px');
@@ -230,7 +241,7 @@ try {
   await expect(quotaSettings.getByText('定期查询额度，默认每 10 分钟检查一次。', { exact: false })).toBeVisible();
   await window.locator('#quota-check-interval').fill('30');
   await window.locator('#quota-check-interval').press('Tab');
-  const switchControl = window.locator('.settings-card').filter({ has: window.getByRole('heading', { name: '监控与桌面', exact: true }) }).locator('.el-switch').first();
+  const switchControl = window.locator('.setting-row').filter({hasText:'桌面通知'}).locator('.el-switch');
   await switchControl.click();
   await window.getByRole('button', { name: '保存设置' }).click();
   await window.getByText('设置已保存', { exact: true }).waitFor();
@@ -271,6 +282,16 @@ try {
   await window.getByRole('button', { name: '≡ 运行记录' }).click();
   await window.getByRole('heading', { name: '最近事件', exact: false }).waitFor();
   await window.screenshot({ path: join(artifacts, 'events.png') });
+  await window.getByRole('button',{name:'◷ 历史归档',exact:true}).click();
+  await expect(window.getByRole('heading',{name:'历史归档',exact:true})).toBeVisible();
+  await window.getByRole('button',{name:'检索历史日志',exact:true}).click();
+  await expect(window.locator('.history-page')).toContainText('worker_started');
+  await instance.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0].setSize(1000,700));
+  await window.screenshot({path:join(artifacts,'history-narrow.png'),animations:'disabled'});
+  assert.equal(await window.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth),false);
+  await window.getByRole('button',{name:'✎ 提示词模板',exact:true}).click();
+  await window.screenshot({path:join(artifacts,'templates-narrow.png'),animations:'disabled'});
+  assert.equal(await window.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth),false);
   // 浏览器窗口关闭后，托盘与 worker 必须保活。
   await instance.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
   assert.equal(await instance.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isVisible()), false);
@@ -283,7 +304,7 @@ try {
   const result = { time: new Date().toISOString(), version, packaged: Boolean(executablePath), connection: snapshot.connection.state,
     logo: logoEvidence,
     threadCount: snapshot.threads.length, quotaWindows: snapshot.quota?.windows.length ?? 0,
-    checks: ['renderer', 'shared-logo-decoded', 'logo-source-hash', 'utility-process', 'sqlite', 'context-bridge', 'navigation', 'manual-menu', 'manual-hover-overlay-without-reflow', 'manual-directory-keyboard', 'manual-search-and-empty-state', 'manual-chapter-navigation', 'manual-narrow-layout', 'explicit-consent', 'appearance-preview-and-cancel', 'appearance-saved-across-pages', 'appearance-theme-and-density', 'appearance-persists-on-worker-restart', 'quota-periodic-default-600-and-persistence', 'local-data-live-preview-and-read-only-refresh', 'local-data-readable-time-and-null-app-task-name', 'settings', 'worker-crash-restart', 'tray-close', 'zero-task-sends'], errors };
+    checks: ['renderer', 'shared-logo-decoded', 'logo-source-hash', 'utility-process', 'sqlite', 'context-bridge', 'navigation', 'manual-menu', 'manual-hover-overlay-without-reflow', 'manual-directory-keyboard', 'manual-search-and-empty-state', 'manual-chapter-navigation', 'manual-narrow-layout', 'explicit-consent', 'appearance-preview-and-cancel', 'appearance-saved-across-pages', 'appearance-theme-and-density', 'appearance-persists-on-worker-restart', 'quota-periodic-default-600-and-persistence', 'local-data-live-preview-and-read-only-refresh', 'local-data-readable-time-and-null-app-task-name', 'settings', 'worker-crash-restart', 'tray-close', 'real-read-only-inspection-zero-intents','history-and-templates-narrow','zero-task-sends'], errors };
   writeFileSync(join(artifacts, executablePath ? 'packaged-result.json' : 'result.json'), JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result, null, 2));
   await window.evaluate(() => window.resume.quit());

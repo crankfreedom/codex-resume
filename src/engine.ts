@@ -28,10 +28,11 @@ export class ResumeEngine {
   port: DesktopPort;
   clock: Clock;
   journal: Journal;
+  private beforeIntent?: (job:Job)=>boolean;
   private scheduleQuota?: (quota: Quota, now: number) => number;
-  constructor(job: Job, port: DesktopPort, clock: Clock, journal: Journal, scheduleQuota?: (quota: Quota, now: number) => number) {
+  constructor(job: Job, port: DesktopPort, clock: Clock, journal: Journal, scheduleQuota?: (quota: Quota, now: number) => number, beforeIntent?: (job:Job)=>boolean) {
     this.job = job; this.port = port; this.clock = clock; this.journal = journal;
-    this.scheduleQuota = scheduleQuota;
+    this.scheduleQuota = scheduleQuota; this.beforeIntent=beforeIntent;
   }
   private persist() { this.journal.save(this.job); }
   private observe(view: ThreadView, stage: 'observe' | 'preflight' | 'verify') {
@@ -143,6 +144,7 @@ export class ResumeEngine {
     this.journal.event('resume_preflight_passed', { blockedTurnId: job.blockedTurnId, accountMatches: true,
       quotaAvailable: true, observation: job.lastObservation });
     if (job.mode === 'live' && job.evidence.serverQuotaBlockedObserved) job.evidence.serverRecoveryObserved = true;
+    if (this.beforeIntent && !this.beforeIntent(job)) {this.persist();return;}
     if (job.resumeCount >= (job.maxResumes ?? 1)) { this.stop('resume_limit_reached'); return; }
     job.baselineTurnIds = finalView.turns.map((turn) => turn.id);
     job.evidence.sameThreadReply = false;
@@ -152,7 +154,8 @@ export class ResumeEngine {
     try { await this.port.send(job.targetThreadId, job.prompt); }
     catch (error) {
       if (error instanceof DispatchCancelledBeforeSend) {
-        job.resumeCount -= 1; this.stop(error.reason ?? 'monitoring_paused_before_send'); return;
+        job.resumeCount -= 1; job.cancelledBeforeDispatchMarker=job.marker; this.stop(error.reason ?? 'monitoring_paused_before_send');
+        this.journal.event('send_cancelled_before_dispatch',{marker:job.marker,reason:job.reason}); return;
       }
       job.phase = 'send_uncertain'; job.reason = 'send_response_uncertain'; this.persist();
       this.journal.event('send_uncertain', { reason: job.reason, message: (error as Error).message }); return;

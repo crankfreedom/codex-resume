@@ -1,5 +1,5 @@
 import { MonitorService } from '../src/app/service.ts';
-import type { Command } from '../src/app/contracts.ts';
+import type { Command, DataQuery } from '../src/app/contracts.ts';
 
 const parent = process.parentPort;
 if (!parent) throw new Error('监控进程必须由 Electron 启动');
@@ -9,10 +9,14 @@ const service = new MonitorService(directory);
 let stopping = false;
 function publish() { parent!.postMessage({ type: 'snapshot', value: service.snapshot() }); }
 parent.on('message', async event => {
-  const message = event.data as { id?: string; command?: Command; type?: string };
+  const message = event.data as { id?: string; command?: Command; query?: DataQuery; type?: string };
   if (message.type === 'stop') {
     stopping = true; clearInterval(timer); service.requestStop();
     await service.stop(); parent!.postMessage({ type: 'stopped' }); process.exit(0);
+  }
+  if (message.id && message.query && !stopping) {
+    try { parent!.postMessage({type:'data',id:message.id,value:service.db.query(message.query)}); }
+    catch(error) {parent!.postMessage({type:'error',id:message.id,message:(error as Error).message});} return;
   }
   if (!message.id || !message.command || stopping) return;
   try {

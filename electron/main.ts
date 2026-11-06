@@ -3,11 +3,12 @@ import type { UtilityProcess } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { defaultSettings } from '../src/app/contracts.ts';
-import type { Command, Snapshot } from '../src/app/contracts.ts';
-import { eventsJsonl } from '../src/app/event-data.ts';
+import type { Command, Snapshot, DataQuery, DataResult, EventFilter } from '../src/app/contracts.ts';
+import { exportEventRange } from '../src/app/export.ts';
+import { validateFilter } from '../src/app/events.ts';
+import { initialResetCards } from '../src/app/reset-cards.ts';
 import logoPath from '../resources/icons/logo.png?asset';
 
 const directory = dirname(fileURLToPath(import.meta.url));
@@ -24,10 +25,11 @@ let stopRequested = false;
 let restartCount = 0;
 let snapshot: Snapshot = {
   connection: { state: 'connecting', message: '监控进程启动中', checkedAt: null }, quota: null, nextQuotaCheckAt: null,
+  resetCards: { ...initialResetCards, cards: [] },
   threads: [], tasks: [], events: [], settings: defaultSettings, dataDirectory,
   runtime: { state: 'starting', heartbeatAt: null },
 };
-const requests = new Map<string, { resolve(value: Snapshot): void; reject(error: Error): void; timer: NodeJS.Timeout }>();
+const requests = new Map<string, { resolve(value: Snapshot | DataResult): void; reject(error: Error): void; timer: NodeJS.Timeout }>();
 const sourceIcon = nativeImage.createFromBuffer(readFileSync(logoPath));
 if (sourceIcon.isEmpty()) throw new Error('应用图标资源无法读取，请重新构建或安装应用');
 const icon = sourceIcon.resize({ width: 256, height: 256, quality: 'best' });
@@ -57,8 +59,10 @@ function notify(next: Snapshot) {
   for (const e of next.events.filter(e => e.id > previous)) {
     const text: Record<string, string> = {
       quota_stop_detected: '任务因额度耗尽停止，正在等待恢复。',
+      observe_recovery_ready:'仅观察任务已确认额度恢复，可在原会话人工继续。',
       resume_submitted: '额度可用，已在原会话提交续跑。', completed: '续跑轮次已完成。',
       suspended: '托管已停止，请检查任务详情。', send_uncertain: '发送结果需要人工核对，已停止自动补发。',
+      reset_uncertain: '重置卡兑换结果不确定，请使用原请求 ID 核对。',
     };
     if (text[e.type]) new Notification({ title: 'Codex Resume', body: text[e.type]!, icon }).show();
   }
@@ -70,13 +74,14 @@ function startWorker() {
     serviceName: 'Codex Resume Monitor', stdio: 'pipe',
     env: { ...process.env, CODEX_RESUME_DATA_DIR: dataDirectory, CODEX_RESUME_VERSION: appVersion },
   });
-  worker.on('message', (message: { type: string; id?: string; value?: Snapshot; message?: string }) => {
+  worker.on('message', (message: { type: string; id?: string; value?: Snapshot | DataResult; message?: string }) => {
     if (message.type === 'snapshot' && message.value) {
-      notify(message.value); snapshot = message.value; snapshot.runtime.heartbeatAt = Date.now(); broadcast();
+      notify(message.value as Snapshot); snapshot = message.value as Snapshot; snapshot.runtime.heartbeatAt = Date.now(); broadcast();
     } else if (message.id) {
       const request = requests.get(message.id); if (!request) return;
       clearTimeout(request.timer); requests.delete(message.id);
-      if (message.type === 'result' && message.value) { snapshot = message.value; request.resolve(snapshot); broadcast(); }
+      if (message.type === 'data' && message.value) request.resolve(message.value);
+      else if (message.type === 'result' && message.value) { snapshot = message.value as Snapshot; request.resolve(snapshot); broadcast(); }
       else request.reject(new Error(message.message ?? '监控操作失败'));
     }
   });
@@ -96,7 +101,15 @@ function command(value: Command) {
   const id = randomUUID();
   return new Promise<Snapshot>((resolve, reject) => {
     const timer = setTimeout(() => { requests.delete(id); reject(new Error('操作超时，请查看任务状态；发送操作不会自动重试。')); }, 90000);
-    requests.set(id, { resolve, reject, timer }); worker!.postMessage({ id, command: value });
+    requests.set(id, { resolve: value => resolve(value as Snapshot), reject, timer }); worker!.postMessage({ id, command: value });
+  });
+}
+function query(value:DataQuery):Promise<DataResult> {
+  if (!worker) return Promise.reject(new Error('监控进程未就绪'));
+  const id=randomUUID();
+  return new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>{requests.delete(id);reject(new Error('查询超时'));},30000);
+    requests.set(id,{resolve:value=>resolve(value as DataResult),reject,timer}); worker!.postMessage({id,query:value});
   });
 }
 function requestQuit() { quitting = true; app.quit(); }
@@ -132,17 +145,17 @@ else {
     ipcMain.handle('resume:snapshot', event => { trusted(event); return snapshot; });
     ipcMain.handle('resume:command', (event, value: Command) => {
       trusted(event);
-      if (!value || !['refresh', 'refreshData', 'add', 'toggle', 'remove', 'reconcile', 'settings'].includes(value.type)) throw new Error('操作无效');
+      if (!value || !['refresh', 'refreshStatus', 'selfCheck', 'templateSave', 'templateDelete', 'edit', 'reorder', 'refreshData', 'resetCardsRefresh', 'resetSchedule', 'resetCancel', 'resetReconcile', 'add', 'toggle', 'remove', 'reconcile', 'settings'].includes(value.type)) throw new Error('操作无效');
       return command(value);
     });
+    ipcMain.handle('resume:query', (event,value:DataQuery) => {trusted(event);return query(value);});
     ipcMain.handle('resume:directory', async event => { trusted(event); await shell.openPath(dataDirectory); });
-    ipcMain.handle('resume:export', async event => {
-      trusted(event);
-      const result = await dialog.showSaveDialog(window!, { title: '导出最近事件', defaultPath: 'codex-resume-events.jsonl', filters: [{ name: 'JSONL', extensions: ['jsonl'] }] });
+    ipcMain.handle('resume:export', async (event, filter?:EventFilter) => {
+      trusted(event); if (filter) validateFilter(filter);
+      const result=await dialog.showSaveDialog(window!,{title:filter?'导出全部筛选事件':'导出最近事件',defaultPath:'codex-resume-events.jsonl',filters:[{name:'JSONL',extensions:['jsonl']}]});
       if (result.canceled || !result.filePath) return null;
-      const latest = await command({ type: 'refreshData' });
-      await writeFile(result.filePath, eventsJsonl(latest.events), 'utf8');
-      return result.filePath;
+      const count=await exportEventRange(join(dataDirectory,'resume.sqlite'),result.filePath,filter ?? {},!filter);
+      return `${result.filePath}（${count} 条）`;
     });
     ipcMain.handle('resume:quit', event => { trusted(event); setTimeout(requestQuit, 0); });
     showWindow(); startWorker();

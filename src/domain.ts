@@ -50,6 +50,7 @@ export interface Job {
   blockedTurnId?: string;
   sentTurnId?: string;
   sentAt?: number;
+  cancelledBeforeDispatchMarker?:string;
   marker: string;
   prompt: string;
   verifyMarker: boolean;

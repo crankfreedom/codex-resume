@@ -9,7 +9,8 @@ const bridge: Bridge = {
     ipcRenderer.on('resume:update', listener);
     return () => ipcRenderer.removeListener('resume:update', listener);
   },
-  exportEvents: () => ipcRenderer.invoke('resume:export'),
+  query: query => ipcRenderer.invoke('resume:query', query),
+  exportEvents: filter => ipcRenderer.invoke('resume:export', filter),
   openDataDirectory: () => ipcRenderer.invoke('resume:directory'),
   quit: () => ipcRenderer.invoke('resume:quit'),
 };

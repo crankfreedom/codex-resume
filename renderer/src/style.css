@@ -93,3 +93,15 @@ html[data-density="compact"] .el-button { padding-top: 6px; padding-bottom: 6px;
   .quota-grid { gap: 12px; }
   .quota-card, .status-card { padding: 18px; }
 }
+
+/* 新增管理入口在窄窗和大字模式下换行，不挤压目标名称。 */
+header > div:first-child { min-width:0; }
+.header-actions { max-width:310px; justify-content:flex-end; }
+.managed-card .task-row { flex-wrap:wrap; }
+.managed-card .task-main { flex-basis:260px; }
+.queue-actions { display:flex; align-items:center; flex-wrap:wrap; gap:6px; flex-basis:100%; }
+.queue-actions small { margin-right:auto; color:var(--text-secondary); }
+.queue-actions .el-button { margin-left:0; }
+.el-message-box__message { white-space:pre-wrap; overflow-wrap:anywhere; }
+.el-drawer .history-page { padding:12px; }
+.inspection, .history-page { color:var(--text-body); }

@@ -72,13 +72,21 @@ try {
   // 仅配置测试实例；显式管道确保不会向当前真实 Codex 投递。
   await window.evaluate(async ({ pipe, target }) => {
     const snapshot = await window.resume.snapshot();
-    await window.resume.command({ type: 'settings', value: { ...snapshot.settings, pipe, callerThreadId: target, notifications: false, pollSeconds: 10 } });
+    await window.resume.command({ type: 'settings', value: { ...snapshot.settings, pipe, callerThreadId: target, notifications: false, pollSeconds: 10, queue:{enabled:true,limit:1} } });
     await window.resume.command({ type: 'refresh' });
   }, { pipe, target });
   await expect.poll(async () => (await window.evaluate(() => window.resume.snapshot())).threads[0]?.id, { timeout: 15000 }).toBe(target);
+  const errors=[];window.on('pageerror',error=>errors.push(error.message));
+  await window.getByRole('button',{name:'✎ 提示词模板',exact:true}).click();
+  await window.getByPlaceholder('模板名称').fill('fixture 默认模板');
+  await window.getByPlaceholder('模板正文').fill('继续完成已授权的夹具任务，先核对进度。');
+  await window.getByText('默认模板',{exact:true}).click();
+  await window.getByRole('button',{name:'保存模板',exact:true}).click();
+  await expect(window.getByRole('heading',{name:'fixture 默认模板 （默认）'})).toBeVisible();
   await window.getByRole('button', { name: '▤ 托管任务' }).click();
   await expect(window.locator('.thread-status')).toHaveText('会话出错');
   await window.getByRole('button', { name: '托管会话', exact: true }).click();
+  assert.equal(await window.locator('.el-dialog textarea').first().inputValue(),'继续完成已授权的夹具任务，先核对进度。');
   await window.locator('.consent-box .el-checkbox').click();
   await window.getByRole('button', { name: '确认并开始托管' }).click();
   await window.getByText('已开始托管；仅在真实额度错误后自动续跑', { exact: true }).waitFor();
@@ -134,6 +142,13 @@ try {
   assert.equal(await window.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false);
   await localData.screenshot({ path: join(artifacts, 'fixture-local-data.png'), animations: 'disabled' });
   await instance.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1240, 850));
+  const beforeReadOnly=await window.evaluate(()=>window.resume.snapshot());
+  await window.getByRole('button',{name:'刷新状态（只读）',exact:true}).click();
+  await expect.poll(async()=> (await window.evaluate(()=>window.resume.snapshot())).inspection?.source,{timeout:60000}).toBe('read_only');
+  const afterReadOnly=await window.evaluate(()=>window.resume.snapshot());
+  assert.equal(sends,0);assert.equal(afterReadOnly.tasks[0].resumeCount,0);
+  assert.equal(afterReadOnly.nextQuotaCheckAt,beforeReadOnly.nextQuotaCheckAt);
+  assert.equal(afterReadOnly.events.some(e=>e.type==='send_intent_persisted'),false);
   used = 100;
   await window.getByRole('button', { name: '▤ 托管任务' }).click();
   await window.getByRole('button', { name: '暂停托管', exact: true }).click();
@@ -141,6 +156,7 @@ try {
   await window.evaluate(() => window.resume.command({ type: 'refresh' }));
   assert.equal(sends, 0);
   await window.getByRole('button', { name: '继续托管', exact: true }).click();
+  await window.locator('.el-message-box').getByRole('button',{name:'确认继续托管',exact:true}).click();
   await expect.poll(async () => {
     await window.evaluate(() => window.resume.command({ type: 'refresh' }));
     return (await window.evaluate(() => window.resume.snapshot())).tasks[0]?.phase;
@@ -205,8 +221,67 @@ try {
   await expect(window.locator('.event-row').filter({ hasText: '已移除托管记录' })).toContainText([
     '测试夹具：跨额度窗口长任务', '测试夹具：跨额度窗口长任务',
   ]);
+  // 新功能均在本脚本的隔离数据与假管道中验证。
+  goalDb.prepare('UPDATE thread_goals SET status=? WHERE thread_id=?').run('active',target);
+  view.thread.status.type='systemError';view.turns=[structuredClone(historicalFailure)];used=100;
+  await window.getByRole('button',{name:'▤ 托管任务'}).click();
+  await window.getByRole('button',{name:'托管会话',exact:true}).click();
+  await window.getByText('仅观察（后台禁止发送）',{exact:true}).click();
+  await window.locator('.consent-box .el-checkbox').click();
+  await window.getByRole('button',{name:'确认并开始托管',exact:true}).click();
+  await expect.poll(async()=> (await window.evaluate(()=>window.resume.snapshot())).tasks.length).toBe(1);
+  await window.evaluate(()=>window.resume.command({type:'refresh'}));used=0;
+  await window.evaluate(()=>window.resume.command({type:'refresh'}));
+  const observed=await window.evaluate(()=>window.resume.snapshot());
+  assert.equal(sends,1);assert.equal(observed.tasks[0].resumeCount,0);assert.equal(observed.queue.held,0);
+  assert.ok(observed.events.some(e=>e.type==='observe_recovery_ready'));
+  await window.getByRole('button',{name:'详情',exact:true}).click();
+  await window.getByRole('button',{name:'运行只读自检',exact:true}).click();
+  await expect(window.locator('.el-drawer .inspection')).toContainText('仅观察，后台不会创建发送意图');
+  await window.locator('.el-drawer__close-btn').click();
+  await window.getByRole('button',{name:'暂停托管',exact:true}).click();
+  await window.getByRole('button',{name:'暂停后编辑配置',exact:true}).click();
+  const editor=window.getByRole('dialog',{name:'编辑托管配置 · 保存后保持暂停'});
+  await editor.locator('textarea').fill('配置修订后的夹具续跑提示词');
+  await editor.getByText('自动续跑',{exact:true}).click();
+  await editor.getByRole('button',{name:'保存并保持暂停',exact:true}).click();
+  await expect(editor).not.toBeVisible();
+  const edited=await window.evaluate(()=>window.resume.snapshot());assert.equal(edited.tasks[0].config.revision,2);assert.equal(edited.tasks[0].enabled,false);
+  await window.getByRole('button',{name:'继续托管',exact:true}).click();
+  await expect(window.locator('.el-message-box')).toContainText('配置修订后的夹具续跑提示词');
+  await window.locator('.el-message-box').getByRole('button',{name:'确认继续托管',exact:true}).click();
+  await window.evaluate(()=>window.resume.command({type:'refresh'}));assert.equal(sends,2);
+  view.thread.status.type='idle';view.turns[0].status='completed';
+  await window.evaluate(()=>window.resume.command({type:'refresh'}));
+  goalDb.prepare('DELETE FROM thread_goals WHERE thread_id=?').run(target);
+  await window.evaluate(()=>window.resume.command({type:'refresh'}));
+  await expect.poll(async()=> (await window.evaluate(()=>window.resume.snapshot())).tasks.length).toBe(0);
+  const fixtureDb=new DatabaseSync(join(dataDirectory,'resume.sqlite'));
+  fixtureDb.exec('PRAGMA busy_timeout=5000; BEGIN IMMEDIATE');
+  for(let i=0;i<155;i++)fixtureDb.prepare('INSERT INTO events(time,task_id,task_name,type,details) VALUES(?,?,?,?,?)').run(Date.now(),waitingSnapshot.tasks[0].id,'夹具历史','fixture_history',JSON.stringify({reason:'fixture_reason',index:i}));
+  fixtureDb.exec('COMMIT');fixtureDb.close();
+  await window.getByRole('button',{name:'◷ 历史归档',exact:true}).click();
+  await expect(window.getByRole('heading',{name:'历史归档',exact:true})).toBeVisible();
+  await window.getByRole('button',{name:'查看生命周期时间线',exact:true}).first().click();
+  await expect(window.locator('.history-page')).toContainText('投递轮次已结束');
+  await window.getByRole('button',{name:'检索历史日志',exact:true}).click();
+  await window.getByPlaceholder('任务 ID（留空含应用事件）').fill('');
+  await window.getByPlaceholder('事件类型（精确匹配）').fill('fixture_history');
+  await window.getByRole('button',{name:'查询',exact:true}).click();
+  await expect(window.locator('.history-row')).toHaveCount(50);
+  for(const count of [50,50,5]){await window.getByRole('button',{name:'下一页（更早）',exact:true}).click();await expect(window.locator('.history-row')).toHaveCount(count);}
+  await expect(window.getByRole('button',{name:'下一页（更早）',exact:true})).toBeDisabled();
+  const rangePath=join(dataDirectory,'range.jsonl');
+  await instance.evaluate(({dialog},filePath)=>{dialog.showSaveDialog=async()=>({canceled:false,filePath});},rangePath);
+  await window.getByRole('button',{name:'导出全部筛选结果',exact:true}).click();
+  await expect.poll(()=>{try{return readFileSync(rangePath,'utf8').trim().split('\n').length;}catch{return 0;}}).toBe(155);
+  await instance.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0].setSize(1000,700));
+  await expect(window.locator('.el-message')).toHaveCount(0);
+  await window.screenshot({path:join(artifacts,'fixture-history-narrow.png'),animations:'disabled'});
+  assert.equal(await window.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth),false);
+  assert.deepEqual(errors,[]);
   const result = { time: new Date().toISOString(), source: 'fake_named_pipe_fixture', realQuotaRecoveryVerified: false,
-    sends, sameThread: true, checks: ['GUI-consent', 'systemError-message-only-curly-apostrophe', 'diagnostic-version-3-and-error-evidence', 'quota-blocked-zero-sends', 'quota-log-aggregation', 'quota-log-actual-schedule', 'local-data-live-preview', 'local-data-refresh-without-quota-or-send', 'local-data-readable-times', 'JSONL-matches-preview', 'local-data-narrow-layout', 'removed-task-name-retained', 'pause-blocks-dispatch', 'recovery-recheck', 'preflight-and-receipt-logs', 'waiting-receipt-label', 'matched-running-label-overview-list-detail', 'matched-running-narrow-layout', 'same-thread-receipt', 'settings-card-order', 'goal-round-complete-retained', 'completed-auto-removed', 'completed-add-rejected', 'paused-goal-retained-no-send'], evidence: completion.details.evidence };
+    sends, sameThread: true, checks: ['GUI-consent', 'systemError-message-only-curly-apostrophe', 'diagnostic-version-3-and-error-evidence', 'quota-blocked-zero-sends', 'quota-log-aggregation', 'quota-log-actual-schedule', 'local-data-live-preview', 'local-data-refresh-without-quota-or-send', 'local-data-readable-times', 'JSONL-matches-preview', 'local-data-narrow-layout', 'removed-task-name-retained', 'pause-blocks-dispatch', 'recovery-recheck', 'preflight-and-receipt-logs', 'waiting-receipt-label', 'matched-running-label-overview-list-detail', 'matched-running-narrow-layout', 'same-thread-receipt', 'settings-card-order', 'goal-round-complete-retained', 'completed-auto-removed', 'completed-add-rejected', 'paused-goal-retained-no-send','template-GUI-copy','read-only-refresh-ready-zero-intents','observe-zero-send-and-slot','paused-edit-revision-confirmation','priority-and-queue-controls','archive-timeline','155-events-pagination-and-range-export','history-narrow-layout'], errors, evidence: completion.details.evidence };
   writeFileSync(join(artifacts, 'fixture-result.json'), JSON.stringify(result, null, 2)); console.log(JSON.stringify(result, null, 2));
 } finally {
   goalDb.close();

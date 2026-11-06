@@ -26,8 +26,8 @@ class FakeDesktop {
   async quota() { this.quotaCalls++; if (this.quotaError) throw this.quotaError; return structuredClone(this.quotaValue); }
   async call<T>() { return { pinnedThreads: [], threads: [{ id: this.target, title: '测试长任务', kind: 'codex', hostId: 'local', status: { type: 'idle' } }] } as T; }
   async readThread() { await this.afterRead?.(); return structuredClone(this.view); }
-  async send(_id: string, prompt: string, beforeDispatch?: () => void) {
-    this.onSend?.(); beforeDispatch?.(); this.sends++;
+  async send(_id: string, prompt: string, beforeDispatch?: (reconnected?:boolean) => void | Promise<void>) {
+    this.onSend?.(); await beforeDispatch?.(); this.sends++;
     this.view.turns.unshift({ id: 'sent-' + this.sends, status: 'completed', items: [
       { type: 'functionCallOutput', namespace: 'codex_app', name: 'send_message_to_thread', output: { text: prompt } },
       { type: 'agentMessage', text: '业务完成' },
@@ -629,4 +629,93 @@ test('暂停标志不会被晚到的引擎存盘覆盖，设置和记录重启�
     assert.equal(restored.db.settings().callerThreadId, desktop.caller);
     assert.ok(restored.db.events().length >= 3);
   } finally { await restored.stop(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('可发送夹具的只读刷新与自检均零意图零发送，不改额度调度与授权', async () => {
+  const {service,desktop,cleanup}=await setup();
+  try {
+    await add(service,desktop); await service.tick(true);
+    desktop.quotaValue=exampleQuota(0,Date.now());
+    const before=service.db.jobs(); const next=service.snapshot().nextQuotaCheckAt;
+    for (const type of ['refreshStatus','selfCheck'] as const) {
+      await service.command({type});
+      assert.equal(desktop.sends,0); assert.equal(service.db.db.prepare('SELECT count(*) AS n FROM attempts').get()!.n,0);
+      assert.deepEqual(service.db.jobs(),before); assert.equal(service.snapshot().nextQuotaCheckAt,next);
+      assert.equal(service.snapshot().inspection?.tasks[before[0]!.job.id]?.find(c=>c.key==='account')?.status,'pass');
+    }
+    desktop.goalError=new Error('Goal 源库结构不兼容'); await service.inspect();
+    assert.equal(service.inspection?.tasks[before[0]!.job.id]?.[0]?.status,'unknown');
+    desktop.goalError=undefined; desktop.quotaValue={}; await service.inspect();
+    assert.equal(service.inspection?.tasks[before[0]!.job.id]?.find(c=>c.key==='quota')?.status,'unknown');
+  } finally { await cleanup(); }
+});
+
+test('完整归档事务保留任务摘要、事件及attempts；手动移除不冒充完成',async()=>{
+  const {service,desktop,cleanup}=await setup();
+  try {
+    const job=await add(service,desktop);await service.tick(true);desktop.quotaValue=exampleQuota(0,Date.now());await service.tick(true);await service.tick(true);
+    assert.equal(service.db.tasks().length,0);
+    const a=service.db.query({type:'archives'}).archives![0]!;
+    assert.equal(a.id,job.id);assert.equal(a.reason,'current_task_completed');assert.equal(a.resumeCount,1);assert.equal(a.incomplete,false);
+    assert.equal(service.db.query({type:'timeline',taskId:job.id}).attempts!.length,1);
+    service.db.removeCompleted(job.id);assert.equal(service.db.query({type:'archives'}).archives!.length,1);
+    desktop.view.turns=[{id:'blocked2',status:'failed',error:{code:'UsageLimitExceeded'}}];
+    const second=await add(service,desktop);await service.command({type:'toggle',id:second.id,enabled:false});await service.command({type:'remove',id:second.id});
+    assert.equal(service.db.query({type:'archives'}).archives![0]!.reason,'user_removed');
+  } finally {await cleanup();}
+});
+
+test('模板复制、暂停编辑、修订授权与累计次数保留；模板更新不追改任务',async()=>{
+  const {service,desktop,cleanup}=await setup();
+  try {
+    await service.command({type:'templateSave',value:{id:'t',name:'默认',body:'原模板正文',isDefault:true}});
+    await service.command({type:'add',targetThreadId:desktop.target,prompt:service.db.templates()[0]!.body,maxResumes:3});
+    const task=service.db.tasks()[0]!;
+    await service.command({type:'templateSave',value:{id:'t',name:'已修改',body:'新正文',isDefault:true}});
+    await service.command({type:'templateDelete',id:'t'}); assert.equal(service.db.tasks()[0]!.prompt,'原模板正文');
+    const value={...task.config,prompt:'仅未来发送的新提示词',maxResumes:2};
+    await assert.rejects(service.command({type:'edit',id:task.id,revision:1,value}),/暂停/);
+    await service.command({type:'toggle',id:task.id,enabled:false});
+    const job=service.db.jobs()[0]!.job;job.resumeCount=1;service.db.journal(job.id).save(job);
+    await service.command({type:'edit',id:task.id,revision:1,value});
+    assert.equal(service.db.tasks()[0]!.enabled,false);assert.equal(service.db.tasks()[0]!.resumeCount,1);
+    assert.equal(service.db.config(task.id).revision,2);
+    await assert.rejects(service.command({type:'toggle',id:task.id,enabled:true}),/确认/);
+    await service.command({type:'toggle',id:task.id,enabled:true,confirmedRevision:2});
+    assert.equal(service.db.tasks()[0]!.resumeCount,1);
+    assert.equal(service.db.events().find(e=>e.type==='config_revised')!.details.prompt,undefined);
+  } finally {await cleanup();}
+});
+
+test('仅观察在发送意图之前强制阻断，恢复提醒跨重开去重，切换必须暂停并确认',async()=>{
+  const {service,desktop,cleanup}=await setup();
+  try {
+    await service.command({type:'add',targetThreadId:desktop.target,prompt:'继续',maxResumes:3,config:{mode:'observe'}});
+    await service.tick(true);desktop.quotaValue=exampleQuota(0,Date.now());await service.tick(true);await service.tick(true);
+    const task=service.db.tasks()[0]!;
+    assert.equal(task.resumeCount,0);assert.equal(desktop.sends,0);assert.equal(service.db.unresolved(task.id),false);
+    assert.equal(service.db.db.prepare('SELECT count(*) AS n FROM attempts').get()!.n,0);
+    assert.equal(service.db.events().filter(e=>e.type==='observe_recovery_ready').length,1);
+    const {AppDatabase}=await import('../src/app/database.ts');
+    service.db.close();service.db=new AppDatabase(join(service.directory,'resume.sqlite'));await service.tick(true);
+    assert.equal(service.db.events().filter(e=>e.type==='observe_recovery_ready').length,1);
+    await service.command({type:'toggle',id:task.id,enabled:false});
+    await service.command({type:'edit',id:task.id,revision:1,value:{...task.config,mode:'auto',prompt:'确认后的未来提示词',maxResumes:3}});
+    await assert.rejects(service.command({type:'toggle',id:task.id,enabled:true,confirmedRevision:1}),/确认/);
+    await service.command({type:'toggle',id:task.id,enabled:true,confirmedRevision:2});await service.tick(true);assert.equal(desktop.sends,1);
+  } finally {await cleanup();}
+});
+
+test('编辑上限等于已使用次数可仅观察，自动续跑仍不能重启额度投递，低于累计值拒绝',async()=>{
+  const {service,desktop,cleanup}=await setup();try{
+    const job=await add(service,desktop);await service.command({type:'toggle',id:job.id,enabled:false});
+    job.resumeCount=2;service.db.journal(job.id).save(job);
+    const config=service.db.config(job.id);
+    await assert.rejects(service.command({type:'edit',id:job.id,revision:1,value:{...config,prompt:'继续',maxResumes:1}}),/配置无效/);
+    await service.command({type:'edit',id:job.id,revision:1,value:{...config,mode:'observe',prompt:'继续',maxResumes:2}});
+    await service.command({type:'toggle',id:job.id,enabled:true,confirmedRevision:2});
+    desktop.quotaValue=exampleQuota(0,Date.now());await service.tick(true);assert.equal(desktop.sends,0);assert.equal(service.db.tasks()[0]!.resumeCount,2);
+    await service.command({type:'toggle',id:job.id,enabled:false});await service.command({type:'edit',id:job.id,revision:2,value:{...config,mode:'auto',prompt:'继续',maxResumes:2}});
+    await assert.rejects(service.command({type:'toggle',id:job.id,enabled:true,confirmedRevision:3}),/累计续跑次数/);
+  }finally{await cleanup();}
 });

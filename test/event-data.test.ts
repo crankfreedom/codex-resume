@@ -59,7 +59,7 @@ test('旧版 SQLite 补齐历史任务名，未知任务不臆造名称，重复
     database = new AppDatabase(path);
     assert.equal(database.events().length, 4);
     assert.equal(database.events()[0]!.taskName, '历史任务名');
-    assert.equal(database.db.prepare('PRAGMA user_version').get()?.user_version, 2);
+    assert.equal(database.db.prepare('PRAGMA user_version').get()?.user_version, 4);
   } finally {
     if (legacy.isOpen) legacy.close();
     database?.close(); rmSync(directory, { recursive: true, force: true });
