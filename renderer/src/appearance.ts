@@ -1,4 +1,4 @@
-import { normalizeAppearance } from '../../src/app/appearance.ts';
+import { appearanceThemes, normalizeAppearance, themeBackground } from '../../src/app/appearance.ts';
 import type { Appearance } from '../../src/app/appearance.ts';
 
 function mix(hex: string, ratio: number, target = 255): string {
@@ -12,7 +12,9 @@ function mix(hex: string, ratio: number, target = 255): string {
 export function applyAppearance(value: Appearance) {
   const appearance = normalizeAppearance(value);
   const style = document.documentElement.style;
-  const accent = { teal: '#128574', blue: '#3569b6', violet: '#7b56b1' }[appearance.accent];
+  const theme = appearanceThemes.find(item => item.id === appearance.accent)!;
+  const accent = theme.color;
+  const gradient = (ratio: number) => `linear-gradient(135deg, ${mix(accent, ratio, 0)}, ${mix(theme.end, ratio, 0)})`;
   const variables: Record<string, string> = {
     '--font-page-title': `${appearance.pageTitleSize}px`,
     '--font-section': `${appearance.sectionTitleSize}px`,
@@ -27,6 +29,11 @@ export function applyAppearance(value: Appearance) {
     '--text-secondary': appearance.highContrast ? '#607780' : '#81949b',
     '--accent': accent, '--accent-soft': mix(accent, 0.92), '--accent-border': mix(accent, 0.75),
     '--accent-ink': mix(accent, 0.18, 0), '--nav-active-bg': mix(accent, 0.5, 0),
+    '--theme-fill': themeBackground(theme),
+    '--theme-fill-hover': theme.kind === 'gradient' ? gradient(0.12) : mix(accent, 0.12, 0),
+    '--theme-fill-active': theme.kind === 'gradient' ? gradient(0.22) : mix(accent, 0.22, 0),
+    '--nav-active-fill': theme.kind === 'gradient' ? gradient(0.5) : mix(accent, 0.5, 0),
+    '--sidebar-bg': theme.id === 'teal' ? '#152a30' : mix(accent, 0.78, 0),
     '--el-color-primary': accent, '--el-color-primary-dark-2': mix(accent, 0.2, 0),
     '--el-font-size-base': `${appearance.bodyFontSize}px`,
     '--el-font-size-small': `${appearance.secondaryFontSize}px`,
@@ -44,4 +51,6 @@ export function applyAppearance(value: Appearance) {
   for (const level of [3, 5, 7, 8, 9]) variables[`--el-color-primary-light-${level}`] = mix(accent, level / 10);
   for (const [key, entry] of Object.entries(variables)) style.setProperty(key, entry);
   document.documentElement.dataset.density = appearance.density;
+  document.documentElement.dataset.theme = theme.id;
+  document.documentElement.dataset.themeKind = theme.kind;
 }

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { MonitorService } from '../src/app/service.ts';
 import { exampleQuota } from '../src/scenarios.ts';
-import { defaultAppearance } from '../src/app/appearance.ts';
+import { appearanceThemes, defaultAppearance, normalizeAppearance } from '../src/app/appearance.ts';
 import { defaultQuotaCheck } from '../src/app/quota-schedule.ts';
 import type { Job, ThreadView } from '../src/domain.ts';
 
@@ -90,7 +90,7 @@ test('任务名写入事件，移除托管并重启后仍保留，应用事件�
   }
 });
 
-test('旧设置补齐外观，活动任务可保存外观，非法字号不能覆盖有效设置', async () => {
+test('旧设置补齐外观，20 种主题可保存，非法外观不能覆盖有效设置', async () => {
   const { service, desktop, directory } = await setup();
   let restored: MonitorService | undefined;
   let stopped = false;
@@ -108,6 +108,20 @@ test('旧设置补齐外观，活动任务可保存外观，非法字号不能�
     await assert.rejects(service.command({ type: 'settings', value: {
       ...settings, appearance: { ...settings.appearance, bodyFontSize: 400 },
     } }), /外观设置无效/);
+    assert.equal(appearanceThemes.filter(theme => theme.kind === 'solid').length, 10);
+    assert.equal(appearanceThemes.filter(theme => theme.kind === 'gradient').length, 10);
+    assert.equal(normalizeAppearance({ accent: 'not-a-theme' }).accent, 'teal');
+    for (const theme of appearanceThemes) {
+      settings.appearance.accent = theme.id;
+      await service.command({ type: 'settings', value: settings });
+      assert.equal(service.db.settings().appearance.accent, theme.id);
+      assert.equal(service.db.settings().pollSeconds, 45);
+      assert.equal(service.db.enabled(job.id), true);
+    }
+    await assert.rejects(service.command({ type: 'settings', value: {
+      ...settings, appearance: { ...settings.appearance, accent: 'linear-gradient(red, blue)' },
+    } } as never), /外观设置无效/);
+    assert.equal(service.db.settings().appearance.accent, 'ink');
     assert.equal(service.db.settings().appearance.bodyFontSize, 20);
     assert.equal(desktop.sends, 0);
     await service.stop(); stopped = true;

@@ -1,3 +1,33 @@
+// 唯一主题白名单：配置校验、色卡与全局样式共用，旧主题 ID 保持兼容。
+export const appearanceThemes = [
+  { id: 'teal', label: '青绿（默认）', kind: 'solid', color: '#128574', end: '#128574' },
+  { id: 'blue', label: '蓝色', kind: 'solid', color: '#3569b6', end: '#3569b6' },
+  { id: 'violet', label: '紫色', kind: 'solid', color: '#7b56b1', end: '#7b56b1' },
+  { id: 'emerald', label: '松林', kind: 'solid', color: '#23764d', end: '#23764d' },
+  { id: 'cyan', label: '湖蓝', kind: 'solid', color: '#087d91', end: '#087d91' },
+  { id: 'indigo', label: '靛青', kind: 'solid', color: '#5358b2', end: '#5358b2' },
+  { id: 'rose', label: '玫瑰', kind: 'solid', color: '#b3436c', end: '#b3436c' },
+  { id: 'terracotta', label: '陶橙', kind: 'solid', color: '#ad512e', end: '#ad512e' },
+  { id: 'amber', label: '琥珀', kind: 'solid', color: '#946718', end: '#946718' },
+  { id: 'slate', label: '岩灰', kind: 'solid', color: '#526879', end: '#526879' },
+  { id: 'ocean', label: '碧海', kind: 'gradient', color: '#128574', end: '#3569b6' },
+  { id: 'iris', label: '鸢尾', kind: 'gradient', color: '#3569b6', end: '#7b56b1' },
+  { id: 'berry', label: '莓果', kind: 'gradient', color: '#7b56b1', end: '#b3436c' },
+  { id: 'sunset', label: '落日', kind: 'gradient', color: '#b3436c', end: '#ad512e' },
+  { id: 'autumn', label: '秋光', kind: 'gradient', color: '#ad512e', end: '#946718' },
+  { id: 'forest', label: '森泉', kind: 'gradient', color: '#23764d', end: '#087d91' },
+  { id: 'aurora', label: '极光', kind: 'gradient', color: '#128574', end: '#7b56b1' },
+  { id: 'twilight', label: '暮霭', kind: 'gradient', color: '#5358b2', end: '#b3436c' },
+  { id: 'glacier', label: '冰川', kind: 'gradient', color: '#087d91', end: '#5358b2' },
+  { id: 'ink', label: '山岚', kind: 'gradient', color: '#526879', end: '#23764d' },
+] as const;
+
+export type AppearanceTheme = typeof appearanceThemes[number];
+
+export function themeBackground(theme: AppearanceTheme): string {
+  return theme.kind === 'gradient' ? `linear-gradient(135deg, ${theme.color}, ${theme.end})` : theme.color;
+}
+
 export interface Appearance {
   pageTitleSize: number;
   sectionTitleSize: number;
@@ -6,7 +36,7 @@ export interface Appearance {
   navFontSize: number;
   lineHeight: number;
   density: 'comfortable' | 'compact';
-  accent: 'teal' | 'blue' | 'violet';
+  accent: AppearanceTheme['id'];
   fontFamily: 'system' | 'yahei';
   highContrast: boolean;
 }
@@ -63,7 +93,8 @@ export function normalizeAppearance(value: unknown): Appearance {
   }
   if (typeof raw.lineHeight === 'number' && Number.isFinite(raw.lineHeight) && raw.lineHeight >= 1.4 && raw.lineHeight <= 2.2) appearance.lineHeight = raw.lineHeight;
   if (raw.density === 'comfortable' || raw.density === 'compact') appearance.density = raw.density;
-  if (raw.accent === 'teal' || raw.accent === 'blue' || raw.accent === 'violet') appearance.accent = raw.accent;
+  const theme = appearanceThemes.find(item => item.id === raw.accent);
+  if (theme) appearance.accent = theme.id;
   if (raw.fontFamily === 'system' || raw.fontFamily === 'yahei') appearance.fontFamily = raw.fontFamily;
   if (typeof raw.highContrast === 'boolean') appearance.highContrast = raw.highContrast;
   return appearance;

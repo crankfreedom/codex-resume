@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
-import { appearancePresets, defaultAppearance, fontSizeOptions, normalizeAppearance } from '../../src/app/appearance.ts';
+import { appearancePresets, appearanceThemes, defaultAppearance, fontSizeOptions, normalizeAppearance, themeBackground } from '../../src/app/appearance.ts';
 import type { Appearance } from '../../src/app/appearance.ts';
 import { useMonitor } from './store.ts';
 
@@ -9,12 +9,17 @@ const store = useMonitor();
 const saved = computed(() => store.snapshot?.settings.appearance ?? defaultAppearance);
 const draft = ref<Appearance>({ ...saved.value });
 const dirty = computed(() => JSON.stringify(draft.value) !== JSON.stringify(saved.value));
+const themeGroups = [
+  { label: '纯色主题 · 10 种', themes: appearanceThemes.filter(item => item.kind === 'solid') },
+  { label: '渐变主题 · 10 种', themes: appearanceThemes.filter(item => item.kind === 'gradient') },
+];
+const selectedTheme = computed(() => appearanceThemes.find(item => item.id === draft.value.accent)!);
 watch(() => JSON.stringify(saved.value), () => { draft.value = { ...saved.value }; });
 watch(draft, value => { store.previewAppearance = normalizeAppearance(value); }, { deep: true });
 onBeforeUnmount(() => { store.previewAppearance = null; });
 function restore() { draft.value = { ...saved.value }; }
 function defaults() { draft.value = { ...defaultAppearance }; }
-function preset(value: Appearance) { draft.value = { ...value }; }
+function preset(value: Appearance) { draft.value = { ...value, accent: draft.value.accent }; }
 async function save() {
   if (!store.snapshot) return;
   const value = normalizeAppearance(draft.value);
@@ -29,6 +34,19 @@ async function save() {
   <section class="card appearance-card" aria-label="字号与页面外观设置">
     <div class="appearance-heading"><div><h2>字号与页面外观</h2><p>按阅读习惯调整。当前页面即时预览，保存后应用到所有页面并在重启后保留。</p></div><span class="appearance-dirty" v-if="dirty">有未保存的调整</span></div>
     <div class="appearance-presets"><span>阅读预设</span><el-button v-for="item in appearancePresets" :key="item.id" @click="preset(item.value)">{{ item.label }}</el-button></div>
+    <div class="theme-picker" aria-label="主题色选择">
+      <div class="theme-heading"><h3>主题配色</h3><span>当前：{{ selectedTheme.label }} · 点击色卡预览，保存后长期生效</span></div>
+      <fieldset v-for="group in themeGroups" :key="group.label" class="theme-group">
+        <legend>{{ group.label }}</legend>
+        <div class="theme-grid">
+          <label v-for="theme in group.themes" :key="theme.id" class="theme-option" :class="{ 'is-selected': draft.accent === theme.id }">
+            <input v-model="draft.accent" type="radio" name="appearance-theme" :value="theme.id" :aria-label="theme.label">
+            <span class="theme-swatch" :style="{ background: themeBackground(theme) }" aria-hidden="true"><span v-if="draft.accent === theme.id">✓</span></span>
+            <span class="theme-name">{{ theme.label }}</span>
+          </label>
+        </div>
+      </fieldset>
+    </div>
     <div class="appearance-columns">
       <div class="appearance-options">
         <div v-for="option in fontSizeOptions" :key="option.key" class="appearance-option">
@@ -38,11 +56,10 @@ async function save() {
         <div class="appearance-option"><div><label for="appearance-lineHeight">文字行高</label><small>正文与说明列表的行间距</small></div><div class="appearance-number"><el-input-number id="appearance-lineHeight" v-model="draft.lineHeight" :min="1.4" :max="2.2" :step="0.1" :precision="1" :value-on-clear="defaultAppearance.lineHeight" /><span>倍</span></div></div>
         <div class="appearance-option"><div><label for="appearance-fontFamily">界面字体</label><small>使用本机已安装的字体</small></div><el-select id="appearance-fontFamily" v-model="draft.fontFamily" aria-label="界面字体"><el-option label="系统默认" value="system" /><el-option label="微软雅黑" value="yahei" /></el-select></div>
         <div class="appearance-option"><div><label for="appearance-density">界面密度</label><small>调整卡片、列表和控件留白</small></div><el-select id="appearance-density" v-model="draft.density" aria-label="界面密度"><el-option label="舒适" value="comfortable" /><el-option label="紧凑" value="compact" /></el-select></div>
-        <div class="appearance-option"><div><label for="appearance-accent">主题色</label><small>用于主按钮、选中导航与焦点</small></div><el-select id="appearance-accent" v-model="draft.accent" aria-label="主题色"><el-option label="青绿" value="teal" /><el-option label="蓝色" value="blue" /><el-option label="紫色" value="violet" /></el-select></div>
         <div class="appearance-option"><div><strong id="appearance-contrast-label">增强文字对比度</strong><small>加深正文与辅助文字，方便阅读</small></div><el-switch v-model="draft.highContrast" aria-labelledby="appearance-contrast-label" /></div>
       </div>
       <aside class="appearance-preview" aria-label="外观实时预览">
-        <div class="preview-caption">实时预览</div><h3 class="preview-page-title">让阅读更轻松</h3>
+        <div class="preview-caption">实时预览 · {{ selectedTheme.label }}</div><h3 class="preview-page-title">让阅读更轻松</h3>
         <h4>等待额度恢复</h4><p>这段正文展示当前字号和行高。保存后，总览、任务、日志、设置、使用说明和对话框会一起更新。</p>
         <div class="preview-secondary">辅助说明 · 最近检查 10:30:00</div>
         <div class="preview-actions"><el-button type="primary">主要按钮</el-button><el-button>普通按钮</el-button></div>
@@ -63,6 +80,20 @@ async function save() {
 .appearance-presets { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 22px 0 10px; }
 .appearance-presets > span { color: var(--text-secondary); font-size: var(--font-secondary); margin-right: 5px; }
 .appearance-presets .el-button { margin: 0; }
+.theme-picker { margin: 24px 0 8px; padding-bottom: 22px; border-bottom: 1px solid #e9eff0; }
+.theme-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; }
+.theme-heading h3 { font-size: var(--font-section); margin: 0; }
+.theme-heading > span { color: var(--text-secondary); font-size: var(--font-secondary); line-height: var(--content-line-height); }
+.theme-group { min-width: 0; border: 0; padding: 0; margin: 18px 0 0; }
+.theme-group legend { padding: 0; margin-bottom: 10px; font-size: var(--font-secondary); color: var(--text-body); }
+.theme-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 10px; }
+.theme-option { position: relative; min-width: 0; display: flex; flex-direction: column; gap: 8px; padding: 8px; border: 1px solid #dde5e8; border-radius: 8px; cursor: pointer; background: #fff; }
+.theme-option:hover, .theme-option.is-selected { border-color: var(--accent); background: var(--accent-soft); }
+.theme-option.is-selected { box-shadow: 0 0 0 1px var(--accent); }
+.theme-option:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 3px; }
+.theme-option input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; z-index: 1; cursor: pointer; }
+.theme-swatch { display: flex; align-items: center; justify-content: flex-end; height: 36px; border-radius: 5px; padding: 0 9px; color: #fff; font-size: 20px; }
+.theme-name { font-size: var(--font-secondary); color: var(--text-body); text-align: center; line-height: var(--content-line-height); overflow-wrap: anywhere; }
 .appearance-columns { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(250px, 1fr); gap: 28px; align-items: start; }
 .appearance-option { display: flex; align-items: center; gap: 16px; padding: var(--row-padding) 0; border-bottom: 1px solid #e9eff0; }
 .appearance-option > div:first-child { flex: 1; min-width: 0; }
