@@ -1,0 +1,11 @@
+{
+  "source": "真实 read_thread 历史错误，已匿名化；回放不代表实时额度恢复验证",
+  "turn": {
+    "id": "historical-usage-limit-turn",
+    "status": "failed",
+    "error": {
+      "message": "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again at 2:50 PM.",
+      "additionalDetails": null
+    }
+  }
+}

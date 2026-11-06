@@ -52,7 +52,14 @@ export interface Job {
   maxResumes?: number;
   baselineTurnIds: string[];
   reason?: string;
+  lastObservation?: ThreadObservation;
   evidence: { serverLimitObserved: boolean; serverQuotaBlockedObserved?: boolean; serverRecoveryObserved: boolean; sameThreadReply: boolean };
+}
+export interface ThreadObservation {
+  threadId: string;
+  threadStatus: string;
+  activeFlags: string[];
+  latestTurn: { id: string; status: string; error: Record<string, string> | null; usageLimitDetected: boolean } | null;
 }
 export interface DesktopPort {
   quota(): Promise<Quota>;
@@ -112,13 +119,44 @@ export function isUsageLimit(error: unknown): boolean {
     }
   }
   // 仅检查服务端 error 字段，不从模型回复或用户文本推断额度状态。
-  return typeof value.message === 'string'
-    && /you(?:'ve| have) hit your usage limit|usage limit (?:has been )?exceeded/i.test(value.message);
+  // 历史 read_thread 可能只保留 message；真实额度文案使用 U+2019 弯引号。
+  const message = typeof value.message === 'string' ? value.message.normalize('NFKC')
+    .replace(/[\u2018\u2019\u02bc\uff07]/g, "'").replace(/\s+/g, ' ') : '';
+  return /\byou(?:'ve| have) hit your usage limit\b|\busage limit (?:has been )?exceeded\b/i.test(message);
 }
 
 export function stoppedForQuota(view: ThreadView): boolean {
   const turn = view.turns[0];
   return Boolean(turn && turn.status === 'failed' && isUsageLimit(turn.error));
+}
+
+// 只记录状态与有界服务端错误，不收集聊天 items、提示词或账号数据。
+export function describeThread(view: ThreadView): ThreadObservation {
+  const turn = view.turns[0];
+  let error: Record<string, string> | null = null;
+  if (turn?.error && typeof turn.error === 'object') {
+    error = {};
+    const source = turn.error as Record<string, unknown>;
+    for (const key of ['code', 'type', 'kind', 'codexErrorInfo', 'message']) {
+      const value = source[key];
+      if (typeof value === 'string') error[key] = value.slice(0, key === 'message' ? 1000 : 200);
+      else if (value && typeof value === 'object' && key !== 'message') {
+        // 兼容带标签的错误，只提取标签和基础类型字段。
+        const summary = Object.fromEntries(Object.entries(value).slice(0, 8).map(([tag, item]) => [tag.slice(0, 80),
+          item && typeof item === 'object' ? Object.fromEntries(Object.entries(item).slice(0, 8)
+            .filter(([, field]) => field === null || ['string', 'number', 'boolean'].includes(typeof field))
+            .map(([field, content]) => [field.slice(0, 80), typeof content === 'string' ? content.slice(0, 200) : content]))
+            : typeof item === 'string' ? item.slice(0, 200) : item]));
+        error[key] = JSON.stringify(summary).slice(0, 1000);
+      }
+    }
+    error.fields = Object.keys(source).slice(0, 20).map(key => key.slice(0, 80)).join(',');
+  }
+  return {
+    threadId: view.thread.id, threadStatus: view.thread.status.type,
+    activeFlags: [...(view.thread.status.activeFlags ?? [])].sort(),
+    latestTurn: turn ? { id: turn.id, status: turn.status, error, usageLimitDetected: stoppedForQuota(view) } : null,
+  };
 }
 
 export function deliveryHasMarker(turn: Turn, marker: string): boolean {

@@ -1,6 +1,6 @@
 {
   "name": "codex-resume",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "type": "module",
   "description": "Codex 桌面任务额度监控与原会话续跑助手",

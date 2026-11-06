@@ -78,10 +78,10 @@ Windows 使用 `build.win.icon` 指向同一 PNG，electron-builder 自动生成
 
 阅读和搜索本身不调用操作命令；已有后台托管仍继续。顶部“刷新”会推进完整检查，条件满足时可能触发已授权任务的续跑；界面约两秒更新快照不代表两秒查询一次额度。详细内容维护在 `renderer/src/manual.ts`，通过 `ManualPage.vue` 展示，随安装包提供。
 
-更新后需从托盘明确退出旧进程再启动新版，旧进程不会自动出现新功能。为了保留正在运行的旧版，本次 0.2.3 包输出在 `release/0.2.3/`；可用下面的构建后命令生成同类独立目录：
+更新后需从托盘明确退出旧进程再启动新版，旧进程不会自动出现新功能。为了保留正在运行的旧版，本次 0.2.4 包输出在 `release/0.2.4/`；可用下面的构建后命令生成同类独立目录：
 
 ```powershell
-pnpm exec electron-builder --win nsis --x64 --config.directories.output=release/0.2.3
+pnpm exec electron-builder --win nsis --x64 --config.directories.output=release/0.2.4
 ```
 
 ### 进程与数据
@@ -91,6 +91,12 @@ pnpm exec electron-builder --win nsis --x64 --config.directories.output=release/
 预览和 JSONL 导出共用格式：时间按本机时区显示为 `YYYY-MM-DD HH:mm:ss`，包括事件时间、下次检查时间和额度窗口重置时间。事件同时包含 `taskId` 与 `taskName`，新事件保留记录时的任务名，移除托管后仍可查看；旧数据升级时从仍存在的托管记录补齐名称，无法恢复的历史任务名及应用级事件使用 `null`。
 
 “导出最近事件”在确认保存位置后重新读取本机数据，以 JSONL 每行一条、从旧到新写出最近 150 条事件；预览使用便于阅读的 JSON 数组。导出仅包含事件，不是完整数据库备份。SQLite 内部仍使用原始时间戳进行调度。
+
+0.2.4 增加额度排查日志：`thread_state_observed` 记录会话状态、最新轮次、最多 1000 字符的服务端错误摘要及 `usageLimitDetected`，相同状态跨周期和重启去重；`quota_checked` 保留当前判断依据、窗口与限制标志，不含账号标识；`resume_preflight_passed`、`resume_receipt_matched` 分别记录最终发送检查和标记匹配。普通停止事件也携带当时状态；不记录聊天正文或完整工具输出。出现问题后及时导出最近事件，较早记录仍保留在本机 SQLite 中。
+
+`systemError` 仅表示会话出错，是否等待额度取决于最新失败轮次的服务端错误。历史错误可能缺少 `codexErrorInfo`，已兼容 `You’ve hit your usage limit` 的 Unicode 弯引号。Goal 自身预算耗尽不触发额度续跑；本助手核验一次投递轮次的完成，不能据此判断整个 Goal 完成，也不修改 Goal 生命周期。
+
+本次修复独立打包到 `release/0.2.4/win-unpacked/Codex Resume.exe`，保留运行中的旧版。请从托盘退出旧版后启动该文件；已停止的旧托管不会自动重新开启，需要按实际工作需求重新托管。
 
 - Electron 主进程管理窗口、托盘、通知、单实例和受限 IPC；沙箱与上下文隔离开启。
 - 独立 `utilityProcess` 持有桌面管道、顺序调度和 SQLite，每两秒报告心跳；任务检查默认 15 秒，额度按独立策略调度。
@@ -111,7 +117,7 @@ pnpm --dir codex-resume dist
 
 `test:workflow` 使用隔离的假命名管道和数据库，经真实界面验证确认托管、等待、暂停、恢复、单次发送及回执，不调用真实账号。`test:desktop` 要求当前 Codex 可连接，验证真实只读接入、界面、SQLite、监控进程崩溃重启和托盘，不创建托管、不发送。**两种桌面测试须顺序运行**，避免假管道影响唯一发现。
 
-`pack` 默认输出 `release/win-unpacked/Codex Resume.exe`，无需系统 Node.js，须保留整个目录；`dist` 默认在 `release/` 生成 NSIS 安装包。0.2.3 本次使用上述独立输出目录，未覆盖运行中的旧版。首版未配置代码签名或自动更新。桌面冒烟截图与报告自 0.2.1 起按版本保存在 `var/desktop-smoke/<版本>/`；历史 fixture 报告仍在父目录。实际验证边界见 [VALIDATION.md](VALIDATION.md)。
+`pack` 默认输出 `release/win-unpacked/Codex Resume.exe`，无需系统 Node.js，须保留整个目录；`dist` 默认在 `release/` 生成 NSIS 安装包。0.2.4 本次使用上述独立输出目录，未覆盖运行中的旧版，仅生成目录包，未生成 NSIS 安装包。首版未配置代码签名或自动更新。桌面冒烟截图与报告自 0.2.1 起按版本保存在 `var/desktop-smoke/<版本>/`；历史 fixture 报告仍在父目录。实际验证边界见 [VALIDATION.md](VALIDATION.md)。
 
 Electron 首次启动会下载运行时，可提前运行 `pnpm --dir codex-resume install:electron`。启动脚本移除终端继承的 `ELECTRON_RUN_AS_NODE`，确保打开 GUI。
 

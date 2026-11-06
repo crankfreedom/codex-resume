@@ -43,7 +43,8 @@ export class MonitorService {
       this.db.journal(job.id).save(job); this.db.toggle(job.id, false);
       this.db.event(job.id, 'send_uncertain', { reason: job.reason });
     }
-    this.db.event(null, 'worker_started');
+    this.db.event(null, 'worker_started', { appVersion: process.env.CODEX_RESUME_VERSION ?? null, diagnosticsVersion: 2,
+      pollSeconds: this.db.settings().pollSeconds, quotaCheck: this.db.settings().quotaCheck });
   }
   private getClient() {
     if (!this.client) {

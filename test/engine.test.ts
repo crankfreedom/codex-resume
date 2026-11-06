@@ -4,10 +4,12 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createJob, ResumeEngine } from '../src/engine.ts';
-import { fingerprint, isUsageLimit, quotaGate } from '../src/domain.ts';
+import { describeThread, fingerprint, isUsageLimit, quotaGate, stoppedForQuota } from '../src/domain.ts';
 import type { Job, Journal, Quota } from '../src/domain.ts';
 import { exampleQuota, HybridDesktop, quotaFailure, SimulatedDesktop, VirtualClock } from '../src/scenarios.ts';
 import { FileJournal } from '../src/store.ts';
+
+const historicalFailure = JSON.parse(readFileSync(new URL('./fixtures/usage-limit-20261029.json', import.meta.url), 'utf8')).turn;
 
 class MemoryJournal implements Journal {
   saves: Job[] = [];
@@ -66,6 +68,98 @@ test('额度错误只从服务端结构字段识别，普通回复或429不构�
   assert.ok(isUsageLimit({ message: "You've hit your usage limit" }));
   assert.equal(isUsageLimit({ message: '网络429' }), false);
   assert.equal(isUsageLimit({ text: 'UsageLimitExceeded' }), false);
+});
+
+test('真实历史 message-only 额度错误兼容弯引号、全角引号和空白', () => {
+  assert.equal('codexErrorInfo' in historicalFailure.error, false);
+  assert.ok(isUsageLimit(historicalFailure.error));
+  for (const message of ["You've hit your usage limit", 'You’ve hit your usage limit', 'Youʼve hit your usage limit',
+    'You＇ve hit your usage limit', 'You have hit your usage limit', 'You’ve\u00a0hit your\nusage limit',
+    'Usage limit has been exceeded']) assert.ok(isUsageLimit({ message }), message);
+  for (const error of [{ message: 'HTTP 429 Too Many Requests' }, { code: 'session_budget_exceeded' },
+    { message: 'Goal token budget exceeded' }, { text: historicalFailure.error.message }]) {
+    assert.equal(isUsageLimit(error), false);
+  }
+});
+
+test('systemError 本身不构成额度证据，只有最新失败轮次的服务端错误可以触发', async () => {
+  for (const status of ['failed', 'completed', 'interrupted', 'inProgress']) {
+    const { port, job, engine } = await setup();
+    port.view.thread.status = { type: 'systemError' };
+    port.view.turns = [{ ...structuredClone(historicalFailure), status }];
+    assert.equal(stoppedForQuota(port.view), status === 'failed');
+    await engine.step();
+    assert.equal(job.phase, status === 'failed' ? 'waiting_quota' : status === 'inProgress' ? 'observing' : 'suspended');
+    assert.equal(port.sends, 0);
+  }
+  const { port, job, engine } = await setup();
+  port.view.thread.status = { type: 'systemError' };
+  port.view.turns = [{ id: 'latest-network-error', status: 'failed', error: { message: 'HTTP 429' } }, historicalFailure];
+  await engine.step();
+  assert.equal(job.phase, 'suspended'); assert.equal(port.sends, 0);
+});
+
+test('真实历史错误回放：systemError 等待、恢复复查和续跑回执闭环（非真实额度验证）', async () => {
+  const { port, job, engine, journal, clock } = await setup();
+  port.view.thread.status = { type: 'systemError' };
+  port.view.turns = [structuredClone(historicalFailure)];
+  await engine.step();
+  assert.equal(job.phase, 'waiting_quota'); assert.equal(port.sends, 0);
+  assert.equal(job.lastObservation?.latestTurn?.usageLimitDetected, true);
+  await clock.sleep(20000); await engine.step(); await engine.step();
+  assert.equal(job.phase, 'completed'); assert.equal(port.sends, 1);
+  assert.equal(job.evidence.serverLimitObserved, false);
+  assert.ok(journal.events.some(event => event.type === 'resume_preflight_passed'));
+  assert.ok(journal.events.some(event => event.type === 'resume_receipt_matched'));
+});
+
+test('状态日志包含错误依据、限制标记并跨重建去重，不记录聊天正文或账号', async () => {
+  const { port, job, engine, journal, clock } = await setup();
+  port.view.thread.status = { type: 'systemError' };
+  port.view.turns = [{ ...structuredClone(historicalFailure), items: [{ type: 'userMessage', text: 'PRIVATE_CHAT_CONTENT' }] }];
+  await engine.step();
+  const observation = describeThread(port.view);
+  assert.equal(observation.latestTurn?.error?.message, historicalFailure.error.message);
+  assert.equal(observation.latestTurn?.error?.fields, 'message,additionalDetails');
+  const restarted = new ResumeEngine(structuredClone(job), port, clock, journal);
+  await restarted.step();
+  assert.equal(journal.events.filter(event => event.type === 'thread_state_observed').length, 1);
+  const quotaEvent = journal.events.find(event => event.type === 'quota_checked')!.details as Record<string, unknown>;
+  assert.equal(quotaEvent.accountMatches, true);
+  assert.equal(quotaEvent.rateLimitReachedType, 'rateLimitReached');
+  assert.deepEqual(quotaEvent.observation, observation);
+  const serialized = JSON.stringify(journal.events);
+  assert.equal(serialized.includes('PRIVATE_CHAT_CONTENT'), false);
+  assert.equal(serialized.includes('accountId'), false);
+  assert.equal(serialized.includes(job.accountFingerprint), false);
+  const view = structuredClone(port.view); view.turns[0]!.error = { code: 'x'.repeat(1000), message: 'm'.repeat(2000) };
+  assert.equal(describeThread(view).latestTurn!.error!.message!.length, 1000);
+  assert.equal(describeThread(view).latestTurn!.error!.code!.length, 200);
+});
+
+test('非额度失败的停止日志保存当时轮次与错误，避免只剩宽泛停止原因', async () => {
+  const { port, engine, journal } = await setup();
+  port.view.thread.status = { type: 'systemError' };
+  port.view.turns[0]!.error = { codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 429 } }, message: 'HTTP 429' };
+  await engine.step();
+  const event = journal.events.find(event => event.type === 'suspended')!.details as Record<string, unknown>;
+  assert.equal(event.reason, 'last_turn_not_quota_failure');
+  assert.deepEqual(event.observation, describeThread(port.view));
+  assert.equal(port.sends, 0);
+});
+
+test('续跑轮次再次返回 message-only 弯引号额度错误时仍进入下一等待周期', async () => {
+  const { port, job, engine, clock } = await setup();
+  job.followSession = true; job.maxResumes = 2;
+  await engine.step(); await clock.sleep(20000); await engine.step();
+  port.view.thread.status = { type: 'systemError' };
+  port.view.turns[0]!.status = 'failed'; port.view.turns[0]!.error = structuredClone(historicalFailure.error);
+  port.quotaOverride = exampleQuota(100, clock.now() + 3600000);
+  await engine.step();
+  assert.equal(job.phase, 'observing');
+  await engine.step();
+  assert.equal(job.phase, 'waiting_quota'); assert.equal(port.sends, 1);
+  assert.equal(job.blockedTurnId, port.view.turns[0]!.id);
 });
 test('额度恢复前零发送，恢复后原会话恰好续跑一次并得到回执', async () => {
   const { clock, port, job, engine } = await setup();

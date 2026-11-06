@@ -1,5 +1,18 @@
 # 验证记录
 
+## 2026-10-30 修复 Goal 任务额度漏判并增加诊断（REQ-20261029-02）
+
+- 真实只读诊断：2026-10-29 的目标轮次 `01a1859f-6560-7482-86d8-12578e92be79` 为 failed，服务端 error 仅有 message / additionalDetails，缺少 codexErrorInfo；原文使用 U+2019：`You’ve hit your usage limit`。旧匹配器返回 false，修复后返回 true；SQLite 同时记录 `last_turn_not_quota_failure`，该托管发送次数为零。证据在 `var/diagnosis-20261029.json`，没有修改用户数据库。
+- 诊断时目标已有更新的 completed 轮次，当前状态为 notLoaded；修复后的最新轮次判断仍返回 false，不回放旧错误触发真实发送。历史错误识别成功不等于真实恢复成功。
+- 仅对服务端错误文字归一化 Unicode 引号与空白；仍要求目标最新轮次 failed。systemError 在列表显示“会话出错”，普通 429、主动中断、审批、Goal 自身预算耗尽和历史额度失败均不单独触发续跑。
+- 新增状态变化、发送前检查、回执匹配日志；状态快照跨周期／重启去重，额度检查与停止记录附带当前错误依据。错误文字最多 1000 字符，不记录聊天正文、完整工具输出或账号标识；启动记录项目版本、诊断版本及检查周期。
+- `pnpm test`：58 项通过；类型检查和生产构建通过。新增真实文案回归、systemError 与轮次状态分离、旧错误拦截、再次耗尽和诊断去重／字段边界测试。
+- 北京时间 2026-10-30 09:33:36 假命名管道全流程通过：真实历史文案配合模拟 systemError / 额度 / 发送，受限时零发送，模拟恢复后原 fixture 会话恰好投递一次；界面状态、项目版本、错误依据、发送前检查／回执日志及 JSONL 导出均通过。source 为 fake_named_pipe_fixture，不将夹具中的 evidence 布尔值当作真实账号证据。
+- 北京时间 2026-10-30 09:35:00 真实只读桌面冒烟通过，读取 20 个会话和两个额度窗口；项目版本／诊断版本、说明、数据、外观、监控进程重启及托盘通过，界面异常为零，测试实例真实发送为零。
+- 0.2.4 Windows x64 目录包生成在 `release/0.2.4/win-unpacked/`，保留运行中的旧版，未生成 NSIS 安装包。包内主程序、监控程序与页面入口哈希均与最终构建一致；北京时间 2026-10-30 09:37:08 打包程序真实只读冒烟通过，同样读取 20 个会话和两个额度窗口，项目／诊断版本正确，界面异常及测试实例真实发送均为零。首次开发冒烟发现 app.getVersion() 返回 Electron 45.0.0，已改为读取项目清单；最终包在修正后重新生成并核对哈希。
+- 官方依据：[App Server](https://learn.chatgpt.com/docs/app-server) 区分 thread 的运行状态与 turn 的失败错误，并定义额度桶／窗口；[Goals](https://developers.openai.com/cookbook/examples/codex/using_goals_in_codex) 说明目标生命周期与预算控制；[Pricing](https://learn.chatgpt.com/docs/pricing) 说明账号窗口限制。当前内部桥接的历史错误字段保留情况以本机真实数据为准，官方材料不保证历史 read_thread 一定保留结构码。
+- 证据：`test/fixtures/usage-limit-20261029.json`（匿名化真实错误）、`var/diagnosis-20261029.json`、`var/desktop-smoke/fixture-result.json`、`var/desktop-smoke/0.2.4/result.json`、`packaged-result.json`、`package-integrity.json`。真实账号自然额度耗尽、等待真实恢复窗口和自动续跑的完整闭环仍待用户下次验证；不主动消耗额度制造条件。
+
 ## 2026-10-28 本机数据预览与可读事件（REQ-20261028-03）
 
 - “本机数据”直接预览最近 150 条事件并随快照更新，支持只读刷新；确认导出位置后重新读取数据库，预览与 JSONL 共用本机时区的 YYYY-MM-DD HH:mm:ss 格式，包含详情中的毫秒级检查时间及秒级额度重置时间。

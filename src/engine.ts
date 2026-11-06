@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
-  deliveryHasMarker, fingerprint, quotaGate, stoppedForQuota, terminal, DispatchCancelledBeforeSend,
+  deliveryHasMarker, describeThread, fingerprint, quotaGate, stoppedForQuota, terminal, DispatchCancelledBeforeSend,
 } from './domain.ts';
 import type { Clock, DesktopPort, Job, Journal, Mode, Quota, ThreadView } from './domain.ts';
 
@@ -34,9 +34,17 @@ export class ResumeEngine {
     this.scheduleQuota = scheduleQuota;
   }
   private persist() { this.journal.save(this.job); }
+  private observe(view: ThreadView, stage: 'observe' | 'preflight' | 'verify') {
+    const observation = describeThread(view);
+    // 同一状态跨检查周期与重启去重，避免长时间等待刷满最近事件。
+    if (JSON.stringify(observation) === JSON.stringify(this.job.lastObservation)) return;
+    this.job.lastObservation = observation;
+    this.persist();
+    this.journal.event('thread_state_observed', { stage, classifierVersion: 2, ...observation });
+  }
   private stop(reason: string) {
     this.job.phase = 'suspended'; this.job.reason = reason;
-    this.persist(); this.journal.event('suspended', { reason });
+    this.persist(); this.journal.event('suspended', { reason, observation: this.job.lastObservation });
   }
   private sameStoppedTurn(view: ThreadView): boolean {
     if (view.thread.id !== this.job.targetThreadId) { this.stop('thread_identity_changed'); return false; }
@@ -58,6 +66,7 @@ export class ResumeEngine {
     }
     if (job.phase === 'verifying') { await this.verify(); return; }
     const view = await this.port.readThread(job.targetThreadId);
+    this.observe(view, 'observe');
     if (view.thread.id !== job.targetThreadId) { this.stop('thread_identity_changed'); return; }
     if (job.phase === 'observing') {
       if (view.thread.status.type === 'active') return;
@@ -78,7 +87,8 @@ export class ResumeEngine {
       job.phase = 'waiting_quota';
       if (job.mode === 'live') job.evidence.serverLimitObserved = true;
       this.persist();
-      this.journal.event('quota_stop_detected', { mode: job.mode, source: job.mode === 'live' ? 'server_error' : 'injected', blockedTurnId: job.blockedTurnId });
+      this.journal.event('quota_stop_detected', { mode: job.mode, source: job.mode === 'live' ? 'server_error' : 'injected', blockedTurnId: job.blockedTurnId,
+        observation: job.lastObservation });
     } else if (!this.sameStoppedTurn(view)) return;
     if (wasWaiting && options.nextQuotaCheckAt !== undefined && job.nextCheckAt !== options.nextQuotaCheckAt) {
       job.nextCheckAt = options.nextQuotaCheckAt; this.persist();
@@ -87,14 +97,20 @@ export class ResumeEngine {
     const quota = await this.port.quota();
     if (fingerprint(quota) !== job.accountFingerprint) { this.stop('account_changed'); return; }
     const gate = quotaGate(quota, job.bucketId, this.clock.now());
-    this.journal.event('quota_checked', { mode: job.mode, ...gate });
+    const bucket = quota.rateLimitsByLimitId != null ? quota.rateLimitsByLimitId[job.bucketId] : quota.rateLimits;
+    this.journal.event('quota_checked', { mode: job.mode, ...gate, bucketId: job.bucketId, accountMatches: true,
+      ordinaryUsageAllowed: quota.ordinaryUsageAllowed ?? null, rateLimitReachedType: bucket?.rateLimitReachedType ?? null,
+      spendControlReached: bucket?.spendControlReached ?? null, observation: job.lastObservation });
     if (!gate.available) {
       if (job.mode === 'live' && gate.reason === 'quota_blocked') job.evidence.serverQuotaBlockedObserved = true;
       job.nextCheckAt = this.scheduleQuota?.(quota, this.clock.now()) ?? gate.nextCheckAt; this.persist(); return;
     }
     // 最后一道会话检查放在额度查询之后，减少人工恢复与自动发送的竞态窗口。
     const finalView = await this.port.readThread(job.targetThreadId);
+    this.observe(finalView, 'preflight');
     if (!this.sameStoppedTurn(finalView)) return;
+    this.journal.event('resume_preflight_passed', { blockedTurnId: job.blockedTurnId, accountMatches: true,
+      quotaAvailable: true, observation: job.lastObservation });
     if (job.mode === 'live' && job.evidence.serverQuotaBlockedObserved) job.evidence.serverRecoveryObserved = true;
     job.baselineTurnIds = finalView.turns.map((turn) => turn.id);
     job.phase = 'sending'; job.resumeCount += 1; job.sentAt = this.clock.now();
@@ -114,6 +130,7 @@ export class ResumeEngine {
   async verify(): Promise<void> {
     const job = this.job;
     const view = await this.port.readThread(job.targetThreadId);
+    this.observe(view, 'verify');
     if (view.thread.id !== job.targetThreadId) { this.stop('thread_identity_changed'); return; }
     // 同时校验输入投递标记，防止把人工启动的另一轮误当作自动续跑成功。
     const own = view.turns.find((turn) => !job.baselineTurnIds.includes(turn.id) && deliveryHasMarker(turn, job.marker));
@@ -125,6 +142,8 @@ export class ResumeEngine {
       return;
     }
     if (job.sentTurnId && own.id !== job.sentTurnId) { this.stop('resume_turn_identity_changed'); return; }
+    if (job.sentTurnId !== own.id) this.journal.event('resume_receipt_matched', { turnId: own.id, status: own.status,
+      latestTurnId: view.turns[0]?.id, markerMatched: true });
     job.sentTurnId = own.id; this.persist();
     if (own.status === 'inProgress') return;
     if (own.status !== 'completed') {

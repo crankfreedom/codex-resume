@@ -8,13 +8,16 @@ import { strict as assert } from 'node:assert';
 import { _electron as electron, expect } from '@playwright/test';
 
 const target = randomUUID();
+const version = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 const pipe = `\\\\.\\pipe\\codex-app-tools-test-${randomUUID()}`;
 const sockets = new Set();
 const reset = Math.floor(Date.now() / 1000) + 2;
 let used = 100;
 let sends = 0;
 let quotaCalls = 0;
-const view = { thread: { id: target, status: { type: 'idle' } }, turns: [{ id: 'fixture-quota-failure', status: 'failed', error: { code: 'UsageLimitExceeded' } }] };
+const historicalFailure = JSON.parse(readFileSync(new URL('../test/fixtures/usage-limit-20261029.json', import.meta.url), 'utf8')).turn;
+// 真实历史错误文案 + 模拟 systemError/额度/发送，不能记为真实跨窗口验证。
+const view = { thread: { id: target, status: { type: 'systemError' } }, turns: [historicalFailure] };
 const server = net.createServer(socket => {
   sockets.add(socket); socket.on('close', () => sockets.delete(socket));
   let buffer = Buffer.alloc(0);
@@ -33,10 +36,11 @@ const server = net.createServer(socket => {
           quotaCalls++;
           value = { accountId: 'FIXTURE-NOT-A-REAL-ACCOUNT', ordinaryUsageAllowed: true, rateLimitsByLimitId: { codex: { primary: { usedPercent: used, resetsAt: reset, windowDurationMins: 300 }, secondary: { usedPercent: 10, resetsAt: reset + 604800, windowDurationMins: 10080 } } } };
         }
-        else if (tool === 'list_threads') value = { pinnedThreads: [], threads: [{ id: target, title: '测试夹具：跨额度窗口长任务', kind: 'codex', hostId: 'local', status: 'idle', cwd: '本地模拟，不是真实会话' }] };
+        else if (tool === 'list_threads') value = { pinnedThreads: [], threads: [{ id: target, title: '测试夹具：跨额度窗口长任务', kind: 'codex', hostId: 'local', status: view.thread.status.type, cwd: '本地模拟，不是真实会话' }] };
         else if (tool === 'read_thread') { assert.equal(args.threadId, target); value = view; }
         else if (tool === 'send_message_to_thread') {
           assert.equal(args.threadId, target); assert.equal(used, 0); sends++;
+          view.thread.status.type = 'idle';
           view.turns.unshift({ id: `fixture-resumed-${sends}`, status: 'completed', items: [{ type: 'functionCallOutput', namespace: 'codex_app', name: 'send_message_to_thread', output: { text: args.prompt } }, { type: 'agentMessage', text: '夹具任务完成' }] });
           value = { success: true };
         } else throw new Error('fixture 收到未允许的调用');
@@ -65,6 +69,7 @@ try {
   }, { pipe, target });
   await expect.poll(async () => (await window.evaluate(() => window.resume.snapshot())).threads[0]?.id, { timeout: 15000 }).toBe(target);
   await window.getByRole('button', { name: '▤ 托管任务' }).click();
+  await expect(window.locator('.thread-status')).toHaveText('会话出错');
   await window.getByRole('button', { name: '托管会话', exact: true }).click();
   await window.locator('.consent-box .el-checkbox').click();
   await window.getByRole('button', { name: '确认并开始托管' }).click();
@@ -72,6 +77,12 @@ try {
   await window.evaluate(() => window.resume.command({ type: 'refresh' }));
   await expect.poll(async () => (await window.evaluate(() => window.resume.snapshot())).tasks[0]?.phase).toBe('waiting_quota');
   assert.equal(sends, 0);
+  const waitingSnapshot = await window.evaluate(() => window.resume.snapshot());
+  assert.equal(waitingSnapshot.events.find(event => event.type === 'worker_started').details.appVersion, version);
+  const stateEvent = waitingSnapshot.events.find(event => event.type === 'thread_state_observed');
+  assert.equal(stateEvent.details.threadStatus, 'systemError');
+  assert.equal(stateEvent.details.latestTurn.usageLimitDetected, true);
+  assert.equal(stateEvent.details.latestTurn.error.message, historicalFailure.error.message);
   await window.screenshot({ path: join(artifacts, 'fixture-waiting.png'), animations: 'disabled' });
   await window.getByRole('button', { name: '⚙ 应用设置' }).click();
   const localData = window.locator('.data-card');
@@ -117,6 +128,8 @@ try {
   const snapshot = await window.evaluate(() => window.resume.snapshot());
   assert.equal(snapshot.tasks[0].targetThreadId, target);
   assert.equal(snapshot.tasks[0].enabled, false);
+  assert.ok(snapshot.events.some(event => event.type === 'resume_preflight_passed'));
+  assert.ok(snapshot.events.some(event => event.type === 'resume_receipt_matched'));
   await window.screenshot({ path: join(artifacts, 'fixture-completed.png'), animations: 'disabled' });
   await window.getByRole('button', { name: '移除', exact: true }).click();
   await window.locator('.el-message-box').getByRole('button', { name: '移除', exact: true }).click();
@@ -128,7 +141,7 @@ try {
   await window.getByRole('button', { name: '≡ 运行记录' }).click();
   await expect(window.locator('.event-row').filter({ hasText: '已移除托管记录' })).toContainText('测试夹具：跨额度窗口长任务');
   const result = { time: new Date().toISOString(), source: 'fake_named_pipe_fixture', realQuotaRecoveryVerified: false,
-    sends, sameThread: true, checks: ['GUI-consent', 'quota-blocked-zero-sends', 'local-data-live-preview', 'local-data-refresh-without-quota-or-send', 'local-data-readable-times', 'JSONL-matches-preview', 'local-data-narrow-layout', 'removed-task-name-retained', 'pause-blocks-dispatch', 'recovery-recheck', 'same-thread-receipt', 'completed-stop'], evidence: snapshot.tasks[0].evidence };
+    sends, sameThread: true, checks: ['GUI-consent', 'systemError-message-only-curly-apostrophe', 'diagnostic-version-and-error-evidence', 'quota-blocked-zero-sends', 'local-data-live-preview', 'local-data-refresh-without-quota-or-send', 'local-data-readable-times', 'JSONL-matches-preview', 'local-data-narrow-layout', 'removed-task-name-retained', 'pause-blocks-dispatch', 'recovery-recheck', 'preflight-and-receipt-logs', 'same-thread-receipt', 'completed-stop'], evidence: snapshot.tasks[0].evidence };
   writeFileSync(join(artifacts, 'fixture-result.json'), JSON.stringify(result, null, 2)); console.log(JSON.stringify(result, null, 2));
 } finally {
   await instance?.close(); for (const socket of sockets) socket.destroy();

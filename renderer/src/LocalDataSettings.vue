@@ -35,6 +35,7 @@ async function exportEvents() {
       <span v-if="snapshot?.runtime.heartbeatAt" class="muted">快照更新于 {{ formatDataTime(snapshot.runtime.heartbeatAt) }}</span>
     </div>
     <p>自动展示最近 150 条事件，最新在前；刷新数据会重新读取本机记录。时间使用本机时区，格式为 YYYY-MM-DD HH:mm:ss。</p>
+    <p>排查额度问题时，导出最近事件：包含状态变化、最新轮次、服务端错误摘要、额度识别依据及发送前检查。重复状态会去重，额度检查保留当前依据；不记录聊天正文。</p>
     <pre v-if="events.length" class="data-preview" tabindex="0" aria-label="最近事件数据">{{ content }}</pre>
     <div v-else class="small-empty">{{ snapshot?.runtime.state === 'running' ? '暂无事件记录' : '正在等待本机数据' }}</div>
   </section>

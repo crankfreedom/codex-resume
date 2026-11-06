@@ -11,6 +11,8 @@ import { eventsJsonl } from '../src/app/event-data.ts';
 import logoPath from '../resources/icons/logo.png?asset';
 
 const directory = dirname(fileURLToPath(import.meta.url));
+// 直接运行构建入口时 app.getVersion() 返回 Electron 版本，诊断需使用项目版本。
+const appVersion = String(JSON.parse(readFileSync(join(directory, '../../package.json'), 'utf8')).version);
 if (process.env.CODEX_RESUME_DATA_DIR) app.setPath('userData', process.env.CODEX_RESUME_DATA_DIR);
 else app.setPath('userData', join(app.getPath('appData'), 'codex-resume'));
 const dataDirectory = app.getPath('userData');
@@ -66,7 +68,7 @@ function startWorker() {
   snapshot.runtime = { state: 'starting', heartbeatAt: null }; broadcast();
   worker = utilityProcess.fork(join(directory, 'worker.js'), [], {
     serviceName: 'Codex Resume Monitor', stdio: 'pipe',
-    env: { ...process.env, CODEX_RESUME_DATA_DIR: dataDirectory },
+    env: { ...process.env, CODEX_RESUME_DATA_DIR: dataDirectory, CODEX_RESUME_VERSION: appVersion },
   });
   worker.on('message', (message: { type: string; id?: string; value?: Snapshot; message?: string }) => {
     if (message.type === 'snapshot' && message.value) {

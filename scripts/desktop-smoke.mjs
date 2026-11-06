@@ -53,6 +53,8 @@ try {
   console.log(JSON.stringify({ connection: snapshot.connection, threads: snapshot.threads.length, windows: snapshot.quota?.windows.length }));
   await window.getByText(snapshot.connection.state === 'connected' ? 'Codex 已连接' : 'Codex 未连接', { exact: true }).waitFor();
   assert.equal(snapshot.tasks.length, 0);
+  assert.equal(snapshot.events.find(event => event.type === 'worker_started').details.appVersion, version);
+  assert.equal(snapshot.events.find(event => event.type === 'worker_started').details.diagnosticsVersion, 2);
   assert.ok(!JSON.stringify(snapshot).includes('accountId'));
   await window.screenshot({ path: join(artifacts, 'overview.png'), animations: 'disabled' });
   await window.getByRole('button', { name: '? 使用说明', exact: true }).click();
