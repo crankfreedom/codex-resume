@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, shell, Tray, utilityProcess } from 'electron';
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, Notification, shell, Tray, utilityProcess } from 'electron';
 import type { UtilityProcess } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { join, dirname } from 'node:path';
@@ -50,6 +50,11 @@ function showWindow() {
   window.on('closed', () => { window = null; });
   if (process.env.ELECTRON_RENDERER_URL) void window.loadURL(process.env.ELECTRON_RENDERER_URL);
   else void window.loadFile(join(directory, '../renderer/index.html'));
+}
+// 在独立窗口打开当前页面的控制台（DevTools），用于查看页面打印信息与控制台错误。
+function openConsole() {
+  if (!window || window.isDestroyed()) return;
+  window.webContents.openDevTools({ mode: 'detach', activate: true });
 }
 let lastEventId: number | null = null;
 function notify(next: Snapshot) {
@@ -118,6 +123,7 @@ else {
   app.on('second-instance', showWindow);
   app.on('activate', showWindow);
   app.on('window-all-closed', () => { if (!tray || !snapshot.settings.closeToTray) requestQuit(); });
+  app.on('will-quit', () => globalShortcut.unregisterAll());
   app.on('before-quit', event => {
     quitting = true;
     if (worker) {
@@ -139,6 +145,9 @@ else {
       { type: 'separator' }, { label: '退出并停止监控', click: requestQuit },
     ]));
     tray.on('double-click', showWindow);
+    if (!globalShortcut.register('Control+Shift+Alt+T', openConsole)) {
+      console.warn('[devtools] 快捷键 Ctrl+Shift+Alt+T 注册失败，可能已被其他程序占用');
+    }
     const trusted = (event: Electron.IpcMainInvokeEvent) => {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('来源无效');
     };
