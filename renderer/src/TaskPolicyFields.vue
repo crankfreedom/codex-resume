@@ -17,4 +17,8 @@ const expires=computed({get:()=>{if(model.value.expiresAt===null)return '';const
 <p>开始包含、结束不包含，可跨午夜；非全天时起止不能相同。到期或时段外仍核对已提交投递。</p>
 </el-form>
 </template>
-<style scoped>input {padding:8px;border:1px solid #c9d5d9;border-radius:5px;max-width:100%;font:inherit;} p {font-size:var(--font-secondary);color:var(--muted-color,#70838a);} .el-select {width:160px;}</style>
+<style scoped>
+input { padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; max-width: 100%; font: inherit; color: var(--text-body); background: #fff; }
+p { margin: 6px 0 12px; font-size: var(--font-secondary); color: var(--text-secondary); }
+.el-select { width: 160px; }
+</style>

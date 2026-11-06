@@ -55,4 +55,4 @@ onMounted(()=>void load());
   <el-button :disabled="next===undefined || loading" @click="load(true)">下一页（更早）</el-button>
 </section>
 </template>
-<style scoped>.history-page {padding:24px;min-width:0;} .data-actions,.filters {display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px;} .filters .el-input {width:220px;} .filters label {display:flex;flex-direction:column;gap:6px;} .history-row {padding:16px 0;border-bottom:1px solid #e5ecee;overflow-wrap:anywhere;} pre {white-space:pre-wrap;overflow-wrap:anywhere;} .history-row p {margin:8px 0;}</style>
+<style scoped>.history-page {padding:var(--space-card);min-width:0;} .data-actions,.filters {display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px;} .filters .el-input {width:220px;} .filters label {display:flex;flex-direction:column;gap:6px;} .history-row {padding:var(--space-row) 0;border-bottom:1px solid #e5ecee;overflow-wrap:anywhere;} pre {white-space:pre-wrap;overflow-wrap:anywhere;} .history-row p {margin:4px 0;}</style>

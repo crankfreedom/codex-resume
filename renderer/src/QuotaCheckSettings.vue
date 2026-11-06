@@ -21,10 +21,10 @@ defineProps<{ nextCheckAt: number | null }>();
 </template>
 
 <style scoped>
-.quota-check-settings > p { color: var(--text-secondary); font-size: var(--font-secondary); line-height: var(--content-line-height); margin: 10px 0 18px; }
-.quota-option { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 18px 0; font-size: var(--font-body); }
+.quota-check-settings > p { color: var(--text-secondary); font-size: var(--font-secondary); line-height: var(--content-line-height); margin: 6px 0 12px; }
+.quota-option { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 12px 0; font-size: var(--font-body); }
 .quota-option > label { min-width: 170px; font-weight: 500; }
 .quota-option .el-input-number { width: 150px; }
-.quota-check-settings .quota-next { background: var(--accent-soft); padding: 12px 15px; border-radius: 7px; }
+.quota-check-settings .quota-next { background: var(--accent-soft); padding: 10px 12px; border-radius: 7px; }
 .quota-next strong { color: var(--accent-ink); overflow-wrap: anywhere; }
 </style>

@@ -47,5 +47,5 @@ async function exportEvents() {
 .data-preview-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
 .data-preview-heading h3 { margin: 8px 0 0; font-size: var(--font-body); font-weight: 500; }
 .data-preview-heading h3 span { color: var(--muted-color, #70838a); font-size: var(--font-secondary); margin-left: 6px; }
-.data-preview { max-height: 440px; max-width: 100%; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; margin: 14px 0 0; border: 1px solid #e5ecee; border-radius: 7px; background: #f5f7f9; color: #425c66; font-size: var(--font-secondary); line-height: var(--content-line-height); tab-size: 2; }
+.data-preview { max-height: 440px; max-width: 100%; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; margin: 10px 0 0; border: 1px solid #e5ecee; border-radius: 7px; background: #f5f7f9; color: #425c66; font-size: var(--font-secondary); line-height: var(--content-line-height); tab-size: 2; }
 </style>

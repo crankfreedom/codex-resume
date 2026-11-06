@@ -23,4 +23,11 @@ const labels = { pass:'通过', blocked:'阻断', unknown:'未知', unchecked:'�
   </article>
 </section>
 </template>
-<style scoped>.inspection { margin:20px 0; overflow-wrap:anywhere; } .check-row {padding:10px 0;border-bottom:1px solid #e5ecee;} p {margin:8px 0;} small {color:var(--muted-color,#70838a);}</style>
+<style scoped>
+.inspection { margin: 0; overflow-wrap: anywhere; }
+h3 { margin: 0 0 10px; font-size: var(--font-section); font-weight: 600; }
+.check-row { padding: 8px 0; border-bottom: 1px solid var(--border-subtle); }
+.check-row:last-child { border-bottom: 0; padding-bottom: 0; }
+p { margin: 4px 0; font-size: var(--font-secondary); color: var(--text-secondary); }
+small { color: var(--text-secondary); font-size: var(--font-secondary); }
+</style>

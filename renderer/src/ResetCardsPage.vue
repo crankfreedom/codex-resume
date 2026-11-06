@@ -180,9 +180,9 @@ onMounted(() => { void refresh().catch(error=>ElMessage.error((error as Error).m
 </template>
 
 <style scoped>
-.reset-panel { padding: 18px 20px; }
+.reset-panel { padding: var(--space-card); }
 .schedule-form { max-width: 640px; }
-.schedule-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.schedule-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .schedule-preview { background: #f5f7fa; border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; }
 .schedule-preview dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 8px 0; }
 .schedule-preview dt { color: #78839a; }
