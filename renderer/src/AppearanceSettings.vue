@@ -67,7 +67,7 @@ async function save() {
         <p class="preview-help">“标准阅读”已比旧版默认字体更大。需要更醒目时可选择“大字阅读”，再逐项微调。</p>
       </aside>
     </div>
-    <div class="appearance-footer"><p>离开设置页会撤销未保存的预览；“恢复默认”也需要保存才会长期生效。字号按页面 CSS 像素设置，实际显示还受 Windows 缩放影响。</p><div><el-button :disabled="!dirty" @click="restore">撤销预览</el-button><el-button @click="defaults">恢复默认</el-button><el-button type="primary" :loading="store.busy" :disabled="!dirty || !store.snapshot" @click="save">保存外观</el-button></div></div>
+    <div class="appearance-footer"><p>离开设置页会撤销未保存的预览；“恢复默认”也需要保存才会长期生效。字号按页面 CSS 像素设置，实际显示还受 Windows 缩放影响。</p><div><el-button :disabled="!dirty" @click="restore">撤销预览</el-button><el-button @click="defaults">恢复默认</el-button><el-button type="primary" :loading="store.isPending('settings')" :disabled="!dirty || !store.snapshot" @click="save">保存外观</el-button></div></div>
   </section>
 </template>
 

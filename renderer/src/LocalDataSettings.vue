@@ -1,21 +1,22 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { ElMessage } from 'element-plus';
-import { useMonitor } from './store.ts';
+import { useLocalData, useMonitor } from './store.ts';
+import DataRegion from './DataRegion.vue';
 import { formatDataTime, readableEvent } from '../../src/app/event-data.ts';
 
 const store = useMonitor();
+const localData = useLocalData();
 const snapshot = computed(() => store.snapshot);
-const events = computed(() => snapshot.value?.events ?? []);
+const events = computed(() => store.events);
 const content = computed(() => JSON.stringify(events.value.map(readableEvent), null, 2));
-const openDirectory = () => window.resume.openDataDirectory();
-const quit = () => window.resume.quit();
+const openDirectory = () => localData.openDirectory();
+const quit = () => localData.quit();
 async function refresh() {
   if (await store.command({ type: 'refreshData' })) ElMessage.success('本机数据已刷新');
 }
 async function exportEvents() {
-  try { if (await window.resume.exportEvents()) ElMessage.success('事件已导出'); }
-  catch (error) { ElMessage.error((error as Error).message); }
+  if (await localData.exportEvents()) ElMessage.success('事件已导出');
 }
 </script>
 
@@ -23,11 +24,11 @@ async function exportEvents() {
   <section class="card settings-card data-card">
     <h2>本机数据</h2>
     <p>任务、设置、发送意图与事件保存在：</p>
-    <code>{{ snapshot?.dataDirectory ?? '正在初始化' }}</code>
+    <DataRegion :loading="store.loading.settings" :error="store.snapshotError" label="数据目录" size="small" @retry="store.start()"><code>{{ snapshot?.dataDirectory ?? '正在初始化' }}</code></DataRegion>
     <div class="data-actions">
-      <el-button @click="openDirectory">打开数据目录</el-button>
-      <el-button :loading="store.busy" @click="refresh">刷新数据</el-button>
-      <el-button :disabled="!snapshot || snapshot.runtime.state !== 'running'" @click="exportEvents">导出最近事件</el-button>
+      <el-button :disabled="!snapshot || store.initializing" @click="openDirectory">打开数据目录</el-button>
+      <el-button :loading="store.isPending('refreshData')" @click="refresh">刷新数据</el-button>
+      <el-button :loading="localData.exporting" :disabled="!snapshot || snapshot.runtime.state !== 'running'" @click="exportEvents">导出最近事件</el-button>
       <el-button text type="danger" @click="quit">退出并停止监控</el-button>
     </div>
     <div class="data-preview-heading">
@@ -36,8 +37,10 @@ async function exportEvents() {
     </div>
     <p>自动展示最近 150 条事件，最新在前；刷新数据会重新读取本机记录。时间使用本机时区，格式为 YYYY-MM-DD HH:mm:ss。</p>
     <p>排查额度问题时，导出最近事件：包含状态变化、最新轮次、服务端错误摘要、额度识别依据及发送前检查。重复状态会去重，额度检查保留当前依据；不记录聊天正文。</p>
+    <DataRegion :loading="store.loading.events" :error="store.snapshotError" label="本机事件内容" @retry="store.start()">
     <pre v-if="events.length" class="data-preview" tabindex="0" aria-label="最近事件数据">{{ content }}</pre>
     <div v-else class="small-empty">{{ snapshot?.runtime.state === 'running' ? '暂无事件记录' : '正在等待本机数据' }}</div>
+    </DataRegion>
   </section>
 </template>
 

@@ -15,6 +15,7 @@
     "build": "pnpm typecheck && electron-vite build",
     "test": "node --test test/*.test.ts",
     "test:desktop": "node scripts/desktop-smoke.mjs",
+    "test:renderer": "node scripts/renderer-smoke.mjs",
     "test:workflow": "node scripts/workflow-smoke.mjs",
     "pack": "pnpm build && pnpm install:electron && electron-builder --win --x64 --dir",
     "dist": "pnpm build && pnpm install:electron && electron-builder --win nsis --x64",

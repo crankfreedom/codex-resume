@@ -4,8 +4,11 @@ import type { Snapshot } from '../../src/app/contracts.ts';
 import { version } from '../../package.json';
 import { manualChapters, searchManual } from './manual.ts';
 import logoUrl from '../../resources/icons/logo.png?url';
+import { useMonitor } from './store.ts';
+import DataRegion from './DataRegion.vue';
 
 const props = defineProps<{ snapshot: Snapshot | null }>();
+const store = useMonitor();
 const query = ref('');
 const selectedId = ref('start');
 const directoryOpen = ref(false);
@@ -40,7 +43,8 @@ watch(() => chapter.value?.id, async () => {
       <div class="manual-edition">v{{ version }}<span>核对日期 2026-11-06</span></div>
     </div>
 
-    <div class="manual-live" aria-label="当前更新设置">
+    <DataRegion v-if="store.loading.settings || store.snapshotError" :loading="store.loading.settings" :error="store.snapshotError" label="当前更新设置" size="small" @retry="store.start()" />
+    <div v-else class="manual-live" aria-label="当前更新设置">
       <span>任务检查间隔 <strong>{{ snapshot ? `${snapshot.settings.pollSeconds} 秒` : '读取中' }}</strong></span>
       <span>额度定期检查 <strong>{{ snapshot ? `每 ${snapshot.settings.quotaCheck.intervalSeconds} 秒` : '读取中' }}</strong></span>
       <span>本地状态快照 <strong>约 2 秒</strong></span>
